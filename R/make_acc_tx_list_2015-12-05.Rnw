@@ -1,0 +1,259 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(plyr)
+library(reshape2)
+library(stringr)
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"make_acc_tx_list_2015-12-05")
+oberon_1001_data = file.path(Sys.getenv('OBERON_DATA'),'data1/shhuang/data/1001_genomes')
+metadata_path = file.path(PROJ_DEVEL_PATH,'metadata')
+tfq_gale2_path = file.path(oberon_1001_data,'tfq_gale2')
+prefix.string = file.path(this_analysis_path,"graphics","make_acc_tx_list_2015-12-05-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/ath1001_tx_ballgown_2015-12-05-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Create list of accession transcriptomes}
+\date{December 5, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Using metadata files in \\ \verb|\Sexpr{metadata_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<acc_from_gdoc>>=
+gdoc_files = c('1001_project_new_set - Transcriptomes_051914_clean.csv',
+               '1001_project_new_set - Transcriptomes_060914_clean.csv',
+               '1001_project_new_set - Transcriptomes_072514_clean.csv',
+               '1001_project_new_set - Transcriptomes_080714_clean.csv',
+               '1001_project_new_set - Transcriptomes_081514_clean.csv',
+               '1001_project_new_set - Transcriptomes_102314_clean.csv',
+               '1001_project_new_set - Transcriptomes_102914_clean.csv',
+               '1001_project_new_set - Transcriptomes_111414_clean.csv',
+               '1001_project_new_set - Transcriptomes_111914_clean.csv',
+               '1001_project_new_set - Transcriptomes_+_reads_012715_clean.csv',
+               '1001_project_new_set - Transcriptomes_+_reads_020515_clean.csv')
+
+acc_from_gdoc = rbindlist(alply(gdoc_files,1,function(f) {
+    dt = fread(file.path(metadata_path,f),sep='\t')
+    dt[,1:8,with=FALSE]
+}))
+
+acc_from_dir = dir(tfq_gale2_path)[file.info(dir(tfq_gale2_path,full.names=T))$isdir]
+
+# In gdoc but not in directory
+# NA 9810 9229 8321 9061
+# no FASTQ: 9810, 9061
+# have FASTQ but not aligned 9229, 8321
+setdiff(acc_from_gdoc[,'Accession Number',with=FALSE][[1]],acc_from_dir)
+ 
+# In directory but not in gdoc
+# This is OK since there are accessions sequenced before the 1001 new set file
+setdiff(acc_from_dir,acc_from_gdoc[,'Accession Number',with=FALSE][[1]])
+
+# colorspace from Bob's paper
+acc_cs = fread(file.path(metadata_path,'tbam_CS_151205.txt'),header=FALSE)
+acc_split_cs = strsplit(acc_cs[[1]],'_')
+acc_out_cs = data.table('sample_id'=acc_cs[[1]],
+                        'tg_ecotypeid'=sapply(acc_split_cs,"[",1),
+                        'condition'="",
+                        'source'='Nat2013',
+                        'seq'='SOLiD')
+
+acc_split_dir = strsplit(acc_from_dir,'-')
+# make list according to folders in the alignment directory
+acc_out_dir = data.table('sample_id'=acc_from_dir,
+                        'tg_ecotypeid'=sapply(acc_split_dir,"[",1),
+                        'condition'=sapply(acc_split_dir,function(e) ifelse(length(e)>1,e[2],"")),
+                        'source'=sapply(acc_split_dir,function(e) ifelse(length(e)>1,"GMI","SALK")),
+                        'seq'='Illumina')
+
+acc_out_dir2 = rbind(acc_out_dir,acc_out_cs)
+
+if ("write_tx_table" %in% step_list) {
+  write.table(acc_out_dir2,paste0(prefix.string,'acc_tx_table.tsv'),
+              sep='\t',col.names=TRUE,row.names=FALSE,quote=FALSE)
+}
+@
+
+<<merge_acc_run_all>>=
+# google doc with run information
+gdoc_files = c('1001_project_new_set - Transcriptomes_051914_clean.csv',#1
+               '1001_project_new_set - Transcriptomes_060914_clean.csv',#2
+               '1001_project_new_set - Transcriptomes_072514_clean.csv',#3
+               '1001_project_new_set - Transcriptomes_080714_clean.csv',#4
+               '1001_project_new_set - Transcriptomes_081514_clean.csv',#5
+               '1001_project_new_set - Transcriptomes_102314_clean.csv',#6
+               '1001_project_new_set - Transcriptomes_102914_clean.csv',#7
+               '1001_project_new_set - Transcriptomes_111414_clean.csv',#8
+               '1001_project_new_set - Transcriptomes_111914_clean.csv',#9
+               '1001_project_new_set - Transcriptomes_+_reads_012715_clean.csv',#+1
+               '1001_project_new_set - Transcriptomes_+_reads_020515_clean.csv'#+2,+3
+               )
+# with run info
+gdoc_dt_list_sub1 = alply(gdoc_files[c(1,2,4:9)],1,function(f) {
+  dt = fread(file.path(metadata_path,f),sep='\t')
+  setnames(dt,make.names(colnames(dt)))
+  dt[,`:=`(Accession.Number=as.character(Accession.Number),
+           Plate=as.character(Plate))]
+})
+gdoc_sub1_colnames = c("Plate","Accession.Number")
+gdoc_acc_run_sub1 = rbindlist(lapply(gdoc_dt_list_sub1,function(dt) {
+  has_run5 = rep('run5' %in% colnames(dt),nrow(dt))
+  dt[,`:=`(fc1 = basename(dt[,run1]),
+           fc2 = basename(dt[,run2]),
+           fc3 = basename(dt[,run3]),
+           fc4 = basename(dt[,run4]),
+           fc5 = ifelse(has_run5,ifelse(is.na(dt[,run5]),'-',basename(dt[,run5])),'-'))]
+  dt[,c(gdoc_sub1_colnames,"fc1","fc2","fc3","fc4","fc5"),with=FALSE]
+}))
+setnames(gdoc_acc_run_sub1,"Accession.Number","tg_ecotypeid")
+gdoc_acc_run_long_sub1 = melt(gdoc_acc_run_sub1,id.vars=c("Plate","tg_ecotypeid"),
+                         variable.name="fcvar",value.name="fc")
+gdoc_acc_run_long_sub1 = unique(gdoc_acc_run_long_sub1[fc!="" & fc!="-",])
+
+dir_acc_run = rbindlist(alply(acc_out_dir,1,function(a) {
+  fq_list = list.files(path=file.path(tfq_gale2_path,a[1,sample_id]),pattern="^.*\\.fastq\\.gz$")
+  fq_match = str_match(fq_list, "(.+?)_(.*)_([A-Z]{6})_(L.+)_(R[0-9])_([0-9]{3}).fastq.gz$")
+  fq_run = matrix(unique(fq_match[,c(3,5)]),ncol=2)
+  data.table(a,fc=fq_run[,1],
+             lane=fq_run[,2],
+             fc_lane=paste(fq_run[,1],fq_run[,2],sep="_"))
+},.parallel=TRUE))
+dir_acc_run_salk = dir_acc_run[condition=="" & source=='SALK',]
+dir_acc_run_salk[,run_batch:=ifelse(grepl('^(12|13)',fc),'old_set','new_set')]
+
+# Plate is NA if not in the new_set sub1
+merge_acc_run_sub1 = merge(gdoc_acc_run_long_sub1,dir_acc_run_salk,
+                      by=c("tg_ecotypeid","fc"),all=TRUE)
+# Plate is NA and run from old set, so these are from Mark Ulrich(?)
+merge_acc_run_sub1[,Plate:=ifelse(is.na(Plate) & run_batch=='old_set','MU',Plate)]
+# Plate is NA if not in the old set, and not in the new set sub1
+
+# google doc for "+1/+2/+3" plates
+gdoc_files_sub2 = gdoc_files[10:11]
+gdoc_dt_list_sub2 = alply(gdoc_files_sub2,1,function(f) {
+  dt = fread(file.path(metadata_path,f),sep='\t')
+  setnames(dt,make.names(colnames(dt)))
+  dt[,Accession.Number:=as.character(Accession.Number)]
+})
+gdoc_acc_run_sub2 = unique(rbindlist(lapply(gdoc_dt_list_sub2,function(dt) {
+  dt[,list(Plate,Accession.Number)]
+})))
+setnames(gdoc_acc_run_sub2,"Accession.Number","tg_ecotypeid")
+
+# Plate is NA if not in the new set sub1, not in new set "+1/+2/+3" plates, and not in the old set - these should all be in plate 3
+merge_acc_run_sub2 = merge(gdoc_acc_run_sub2,
+                           merge_acc_run_sub1[is.na(Plate),!"Plate",with=FALSE],
+                           by="tg_ecotypeid",all=TRUE)
+
+# number of ecotypes with no Plate assigned excluding Plate 3
+nrow(merge_acc_run_sub2[is.na(Plate),tg_ecotypeid],])
+
+# Plate 3 in new set doens't have run names
+gdoc_dt_list_sub3 = alply(gdoc_files[3],1,function(f) {
+  dt = fread(file.path(metadata_path,f),sep='\t')
+  setnames(dt,make.names(colnames(dt)))
+  dt[,`:=`(Accession.Number=as.character(Accession.Number),
+           Plate=as.character(Plate))]
+})
+gdoc_sub3_colnames = c("Plate","Accession.Number")
+gdoc_acc_run_sub3 = rbindlist(lapply(gdoc_dt_list_sub3,function(dt) {
+  dt[,gdoc_sub3_colnames,with=FALSE]
+  dt[Accession.Number!='9125',]# labeled missing
+}))
+setnames(gdoc_acc_run_sub3,"Accession.Number","tg_ecotypeid")
+
+gdoc_acc_run_all = unique(rbind(gdoc_acc_run_sub1[,list(Plate,tg_ecotypeid)],
+                          gdoc_acc_run_sub2[,list(Plate,tg_ecotypeid)],
+                          gdoc_acc_run_sub3[,list(Plate,tg_ecotypeid)]))
+# repeated ecotypes that have no Plate assigned
+gdoc_acc_noplate = gdoc_acc_run_all[tg_ecotypeid %in% merge_acc_run_sub2[is.na(Plate),tg_ecotypeid],]
+gdoc_acc_noplate[,N:=.N,by="tg_ecotypeid"]
+gdoc_acc_noplate_repeat = gdoc_acc_noplate[N>1,]
+print(gdoc_acc_noplate_repeat)
+
+# merge_acc_run_sub2[is.na(Plate) & tg_ecotypeid=='9805']: run "140721_HAL_1333_AC1TN4ACXX", cannot by Plate 8
+# merge_acc_run_sub2[is.na(Plate) & tg_ecotypeid=='9807']: run "140721_HAL_1333_AC1TN4ACXX", cannot by Plate 4
+# merge_acc_run_sub2[is.na(Plate) & tg_ecotypeid=='9789']: run "140721_HAL_1333_AC1TN4ACXX_L001", cannot by Plate 4
+# merge_acc_run_sub2[is.na(Plate) & tg_ecotypeid=='9812']: run "150128_JONAS_2237_BC69DUACXX_L005", Plate 9 is labeled "for more reads", so take out Plate 4
+# merge_acc_run_sub2[is.na(Plate) & tg_ecotypeid=='9796']: run "150224_JONAS_2242_AC6MWHACXX", "last_transcrp_and_repools" said Plate 4, so take out Plate 3
+gdoc_acc_run_all_norepeat = gdoc_acc_run_all[!(tg_ecotypeid=='9805' & Plate=='8'),][!(tg_ecotypeid=='9807' & Plate=='4'),][!(tg_ecotypeid=='9789' & Plate=='4'),][!(tg_ecotypeid=='9812' & Plate=="4"),][!(tg_ecotypeid=='9796' & Plate=="3"),]
+
+merge_acc_run_sub3 = merge(gdoc_acc_run_all_norepeat,
+    merge_acc_run_sub2[is.na(Plate),-"Plate",with=FALSE],
+    by="tg_ecotypeid",all.y=TRUE)
+
+# number of ecotypes with no Plate assigned excluding Plate 3 now with Plate assigned
+nrow(merge_acc_run_sub3)
+nrow(merge_acc_run_sub3[!is.na(Plate),])
+# only 6830 (tg_ecotypeid) remains, it's actually linked to 8321 (ecotype_id),which is on Plate 6
+# cross-check all non-matching tg_ecotypeid and ecotypeid accessions in /gale/oberon/data3/hchen/1001/fqMatch.txt.stats.2, this is the only case of non-matching IDs in the transcriptome data
+merge_acc_run_sub3[tg_ecotypeid=='6830',Plate:='6']
+
+# this should have all samples and all lanes
+merge_acc_run_all = rbind(merge_acc_run_sub1[!is.na(Plate) & !is.na(lane),],
+                          merge_acc_run_sub2[!is.na(Plate) & !is.na(lane),],
+                          merge_acc_run_sub3[!is.na(Plate) & !is.na(lane),])
+
+# original number of unique ecotypes and lane combinations
+nrow(dir_acc_run_salk[,list(tg_ecotypeid,fc_lane)])
+# reconstructed number of unique ecotypes and lane combinations
+nrow(unique(merge_acc_run_all[,list(tg_ecotypeid,fc_lane)]))
+
+if ("write_acc_run_all" %in% step_list) {
+  write.table(merge_acc_run_all,paste0(prefix.string,"salk_expt_info.txt"),
+              sep='\t',col.names=TRUE,row.names=FALSE,quote=FALSE)
+}
+@
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+
+\end{document}
+

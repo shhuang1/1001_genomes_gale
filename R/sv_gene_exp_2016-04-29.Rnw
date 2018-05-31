@@ -1,0 +1,191 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(gdata)
+library(ggplot2)
+library(GGally)
+library(NMF)
+library(plyr)
+library(scales)
+library(stringr)
+library(R.utils)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"sv_gene_exp_2016-04-29")
+prefix.string = file.path(this_analysis_path,"graphics","sv_gene_exp_2016-04-29-")
+rdata_prefix = file.path(this_analysis_path,"sv_gene_exp_2016-04-29-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/ath1001_tx_stats_2016-04-29-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Expression of genes in BioNano SV regions}
+\date{April 29, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<sv_closest,echo=FALSE,results="hide">>=
+sv_closest_files = list.files(file.path(sv_data2_path,'GenomicFeatures'),pattern="^.*\\.tsv$")
+
+sv_closest = rbindlist(alply(sv_closest_files,1,function(cl) {
+    dt = fread(file.path(sv_data2_path,'GenomicFeatures',cl))
+    tg_ecotypeid = strsplit(cl,"_")[[1]][1]
+    cbind(tg_ecotypeid,dt)
+},.parallel=TRUE))
+
+sv_code = c('insertion'=1,'deletion'=-1)
+gene_ID0 = str_split_fixed(sv_closest[,V15],";",2)[,1]
+gene_ID = str_split_fixed(gene_ID0,"=",2)[,2]
+sv_closest = sv_closest[,`:=`(geneID=gene_ID,tg_ecotypeidx=paste0("X",tg_ecotypeid),
+                              sv_code=sv_code[V5])]
+sv_closest = sv_closest[,`:=`(ecotype_sv=paste0(tg_ecotypeidx,".",sv_code))]
+
+sv_closest_genes = unique(sv_closest[,geneID])
+@ 
+
+<<gene_counts>>=
+expMat = fread(gNorm_normCounts_k4_file2,sep='\t',header=TRUE)
+setnames(expMat,"V1","gene_id")
+
+common_genes = intersect(sv_closest_genes,expMat[,gene_id])
+
+sv_closest_wide = reshape(unique(sv_closest[,list(ecotype_sv,geneID,sv_code)]),
+                          idvar="geneID",
+                          timevar="ecotype_sv",
+                          v.names="sv_code",
+                          direction="wide")
+
+sv_closest_plot = sv_closest_wide[match(common_genes,geneID),-1,with=FALSE]
+#sv_closest_plot = NAToUnknown(sv_closest_plot,0)
+setnames(sv_closest_plot,gsub("sv_code.","",colnames(sv_closest_plot)))
+
+row_select = rep(TRUE,times=nrow(sv_closest_plot))
+aheatmap(sv_closest_plot[row_select,],Colv=NA,Rowv=NA,na.color="grey50")
+
+exp_mat_plot0 = expMat[match(common_genes,gene_id),
+                       gsub("(\\.1)|(\\.-1)","",colnames(sv_closest_plot)),with=FALSE]
+exp_mat_plot = exp_mat_plot0*(sv_closest_plot!=0)
+colnames(exp_mat_plot) = colnames(sv_closest_plot)
+
+aheatmap(exp_mat_plot[row_select,],scale="row",
+         Rowv=NA,Colv=NA,na.color="grey50")
+@ 
+
+<<pe_genes>>=
+peMat = fread(file.path(pe_gene_path,'20160516','mode_FDR0.01.tsv'),header=TRUE)
+pe_ecotypes = colnames(peMat)[-1]
+setnames(peMat,"ID","gene_id")
+setnames(peMat,pe_ecotypes,paste0("X",pe_ecotypes))
+@ 
+
+<<rrs_bxp,fig.width=5,fig.height=5>>=
+rrs = fread(file.path(sv_data2_path,"GenomicFeatures","RRS1.gff"))
+rrs_id = str_split_fixed(rrs[,V9],"=",2)[,2]
+rrs_common = intersect(rrs_id,expMat[,gene_id])
+
+sv_ecotypex = unique(sv_closest[,tg_ecotypeidx])
+rrs_comb = expand.grid(gene_id=rrs_common,tg_ecotypeidx=sv_ecotypex,stringsAsFactors=FALSE)
+rrs_comb = merge(rrs_comb,sv_closest[,list(gene_id=geneID,tg_ecotypeidx,sv_code)],all.x=TRUE)
+rrs_comb = NAToUnknown(rrs_comb,0)
+
+rrs_exp_long = melt(expMat[match(rrs_common,gene_id),
+                              c("gene_id",sv_ecotypex),with=FALSE],
+                    id.vars="gene_id",variable.name="tg_ecotypeidx",
+                    value.name="rna_norm_counts")
+rrs_comb = merge(rrs_comb,rrs_exp_long,all.x=TRUE)
+
+rrs_pe_long = melt(peMat[match(rrs_common,gene_id),
+                         c("gene_id",intersect(sv_ecotypex,colnames(peMat))),with=FALSE],
+                   id.vars="gene_id",variable.name="tg_ecotypeidx",
+                   value.name="epiallele")
+rrs_comb = merge(rrs_comb,rrs_pe_long,all.x=TRUE)
+rrs_comb[,'sv_code'] = factor(rrs_comb[,'sv_code'])
+
+p1a = ggplot(rrs_comb,aes(x=sv_code,y=rna_norm_counts,fill=sv_code))
+p1b = p1a + geom_boxplot(lwd=0.2,outlier.size=0.2) + facet_wrap(~geneID)
+p1c = p1b + scale_y_continuous("Normalized counts") +
+  scale_x_discrete("",breaks=c(-1,0,1),labels=c("deletion","no SV", "insertion")) +
+  scale_fill_discrete("",breaks=c(-1,0,1),labels=c("deletion","no SV", "insertion")) +
+  theme_bw() +
+  theme(axis.title.x=element_text(size=6),
+        axis.text.x=element_text(size=5,angle=30,hjust=1),
+        axis.title.y=element_text(size=6),
+        axis.text.y=element_text(size=5),
+        legend.title=element_text(size=6),
+        legend.text=element_text(size=5),
+        legend.key=element_blank(),
+        legend.key.size=unit(0.5,"line"),
+        legend.position="top",
+        strip.text=element_text(size=5))
+
+#pdf(paste0(prefix.string,'rrs_bxp.pdf'),width=5,height=5)
+print(p1c)
+#dev.off()
+
+rrs_comb_out = within(rrs_comb,{
+    tg_ecotypeid=sub("^X","",tg_ecotypeidx)
+    rm(tg_ecotypeidx)
+})
+rrs_comb_out = rrs_comb_out[,c('gene_id','tg_ecotypeid','sv_code','rna_norm_counts','epiallele')]
+write.table(rrs_comb_out,paste0(rdata_prefix,'rna_epi.tsv'),
+            sep='\t',col.names=TRUE,row.names=FALSE,quote=FALSE)
+@
+
+<<rrs_hm,fig.width=1.8,fig.height=3>>=
+rrs_expMat = as.matrix(expMat[match(rrs_common,gene_id),sv_ecotypex,with=FALSE])
+rownames(rrs_expMat) = rrs_common
+colnames(rrs_expMat) = sub("X","",colnames(rrs_expMat))
+
+#pdf(paste0(prefix.string,"rrs_hm.pdf"),width=1.8,height=3)
+aheatmap(rrs_expMat,col="YlOrRd",treeheight=10)
+#dev.off()
+@
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

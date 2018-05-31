@@ -1,0 +1,111 @@
+\documentclass{article}
+
+\begin{document}
+
+<<load_libs>>=
+library(zebrafishRNASeq)
+library(RSkittleBrewer)
+library(genefilter)
+library(Biobase)
+library(ballgown)
+library(RUVSeq)
+library(edgeR)
+library(sva)
+library(ffpe)
+library(RColorBrewer)
+library(corrplot)
+library(limma)
+trop = RSkittleBrewer('tropical')
+@
+
+<<loaddata>>=
+load("fpkm.rda")
+pd = ballgown::pData(fpkm)
+pd$dirname = as.character(pd$dirname)
+ss = function(x, pattern, slot=1,...) sapply(strsplit(x,pattern,...), "[", slot)
+pd$IndividualID = ss(pd$dirname, "_", 1)
+tfpkm = expr(fpkm)$trans
+@
+
+## Subset to non-duplicates
+
+You will need the GEUVADIS quality control information and population information available from these sites: https://www.dropbox.com/s/rg63qtuws2liz9r/GD667.QCstats.masterfile.txt, https://www.dropbox.com/s/woacfjxql7gxhnt/pop_data_withuniqueid.txt.
+
+<<pheno>>=
+pheno = read.delim("GD667.QCstats.masterfile.txt", as.is=TRUE)
+m = read.delim("pop_data_withuniqueid.txt",as.is=TRUE)
+pd$SampleID = m$sample_id[match(pd$dirname, m$folder_id)]
+pd$UseThisDup = pheno$UseThisDuplicate[match(pd$SampleID, rownames(pheno))]
+pd$batch = pheno$RNAExtractionBatch[match(pd$SampleID, rownames(pheno))]
+pd$lab = pheno$SeqLabNumber[match(pd$SampleID, rownames(pheno))]
+pd$libprepdate = pheno$LibraryPrepDate[match(pd$SampleID, rownames(pheno))]
+## drop duplicates for this
+
+pd = pd[pd$UseThisDup == 1,]
+
+## subset the transcript expression data to match pheno data
+
+colnames(tfpkm) = ss(colnames(tfpkm),"\\.",2)
+tfpkm = tfpkm[,pd$dirname]
+
+## Remove low expression transcripts
+rowmfpkm = rowMeans(log(tfpkm+1)) 
+keepIndex=which(rowmfpkm > 1)
+tfpkm = tfpkm[keepIndex,]
+tfpkm = as.matrix(tfpkm)
+@
+
+## Run the different analyses and compare to lab
+
+<<estbatch1>>=
+mod1 = model.matrix(~ pd$population)
+mod0 = cbind(mod1[,1])
+
+## Estimate batch with svaseq (unsupervised)
+batch_unsup_sva = svaseq(tfpkm,mod1,mod0,n.sv=1)$sv
+@@
+
+<<estbatch2>>=
+## Estimate batch with pca
+ldat0 = log(tfpkm + 1)
+batch_pca = svd(ldat0 - rowMeans(ldat0))$v[,1]
+@
+
+<<estbatch3>>=
+## Estimate batch with ruv (residuals)
+## this procedure follows the RUVSeq vignette
+## http://www.bioconductor.org/packages/devel/bioc/vignettes/RUVSeq/inst/doc/RUVSeq.pdf
+
+x <- as.factor(pd$population)
+design <- model.matrix(~x)
+y <- DGEList(counts=tfpkm, group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+fit <- glmFit(y, design)
+res <- residuals(fit, type="deviance")
+seqUQ <- betweenLaneNormalization(tfpkm, which="upper")
+controls = rep(TRUE,dim(tfpkm)[1])
+batch_ruv_res = RUVr(seqUQ,controls,k=1,res)$W
+@
+  
+<<estbatch4>>=
+## Estimate batch with ruv empirical controls
+## this procedure follows the RUVSeq vignette
+## http://www.bioconductor.org/packages/devel/bioc/vignettes/RUVSeq/inst/doc/RUVSeq.pdf
+
+y <- DGEList(counts=tfpkm, group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+
+fit <- glmFit(y, design)
+lrt <- glmLRT(fit, coef=2)
+
+controls = rank(lrt$table$LR) <= 400
+batch_ruv_emp <- RUVg(tfpkm, controls, k=1)$W
+@
+
+  
+
+\end{document}

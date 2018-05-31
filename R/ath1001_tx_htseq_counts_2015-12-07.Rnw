@@ -1,0 +1,99 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(plyr)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ath1001_tx_htseq_count_2015-12-07")
+prefix.string = file.path(this_analysis_path,"graphics","ath1001_tx_htseq_count_2015-12-07-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path='cache/ath1001_tx_htseq_counts_2015-12-07-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome gene count matrix from htseq-count}
+\date{December 8, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item rmake data in \\ \verb|\Sexpr{tfq_gale2_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<gene_count,echo=FALSE,results="hide">>=
+sample_id_salk = get_samples_from_dir(data_dir=tfq_gale2_path,src='salk')
+ecotypeid = sample_id_salk[1]
+gene_count_0 = fread(file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.gene.count')))
+gene_names = gene_count_0[,V1]
+
+gene_count_list = alply(sample_id_salk,1,function(ecotypeid) {
+    gene_count_file = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.gene.count'))
+#    print(gene_count_file)
+    if (file.exists(gene_count_file)) {
+      dt = fread(gene_count_file)
+      return(dt[match(gene_names,dt[,V1]),V2])
+    }
+},.parallel=T)
+
+gene_count_mat = do.call("cbind",gene_count_list)
+colnames(gene_count_mat) = sample_id_salk[sapply(gene_count_list,function(el) !is.null(el))]
+rownames(gene_count_mat) = gene_names
+if ("write_gene_count_mat" %in% step_list) {
+    write.table(gene_count_mat,paste0(prefix.string,"count_chr.txt"),
+                sep="\t",row.names=T,col.names=NA,quote=F)   
+}
+
+rownames(gene_count_mat) = sapply(strsplit(gene_names,'!'),'[',2)
+
+if ("write_gene_count_mat" %in% step_list) {
+    write.table(gene_count_mat,paste0(prefix.string,"count.txt"),
+                sep="\t",row.names=T,col.names=NA,quote=F)
+    
+}
+@
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

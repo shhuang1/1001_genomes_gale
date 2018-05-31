@@ -1,0 +1,99 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(ballgown)
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(plyr)
+library(R.utils)
+library(S4Vectors)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ath1001_tx_ballgown_2015-12-05")
+prefix.string = file.path(this_analysis_path,"graphics","ath1001_tx_ballgown_2015-12-05-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/ath1001_tx_ballgown_2015-12-05-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Create ballgown object for 1001 transcriptomes}
+\date{December 5, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item stringtie results in in \\ \verb|\Sexpr{stringtie_01_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<bg_all_meas>>=
+## make phenotype table:
+dataDir = strg_01_path
+sampnames = grep('(10C$|16C$|CS$)',list.files(dataDir),invert=TRUE,value=TRUE)
+pd = data.frame(dirname=genomes_annot[,id_str],
+                latitude=genomes_annot[,latitude],
+                longitude=genomes_annot[,longitude],
+                group=genomes_annot[,group],
+                icon=genomes_annot[,icon]
+                )
+pd = pd[match(sampnames, pd$dirname),]
+pd = subset(pd,!is.na(dirname))
+pd$dirname = as.character(pd$dirname)
+pd$IndividualID = ballgown:::ss(pd$dirname, "_", 1)
+pd$SampleID = pd$dirname
+
+## make various ballgown objects
+## this takes several hours. (compressing this much is quite slow)
+all_meas = c('FPKM','cov','rcount','ucount','mrcount','cov_sd','mcov','mcov_sd','all')
+
+a_ply('all',1,function(meas) {
+    print(meas)
+  bg = ballgown(samples=file.path(dataDir,pd$dirname),pData=pd,
+                meas=meas,verbose=TRUE)
+  save(bg,file=paste0(prefix.string,meas,'.rda'), compress='xz')
+},.parallel=TRUE)
+@
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

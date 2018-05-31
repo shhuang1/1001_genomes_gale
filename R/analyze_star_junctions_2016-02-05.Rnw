@@ -1,0 +1,238 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(fields)
+library(ggplot2)
+library(plyr)
+library(R.utils)
+library(scales)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"analyze_star_junctions_2016-02-05")
+prefix.string = file.path(this_analysis_path,"graphics","analyze_star_junctions_2016-02-05-")
+rdata_prefix = file.path(this_analysis_path,"analyze_star_junctions_2016-02-05-")
+step_list = "load_junctions_dt"
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE)
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome STAR aligner junctions}
+\date{February 5, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item rmake data in \\ \verb|\Sexpr{tfq_gale2_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<make_junctions_dt,echo=FALSE,results="hide",cache=TRUE>>=
+sample_id_salk = get_samples_from_dir(data_dir=tfq_gale2_path,src='salk')
+ecotypeid = sample_id_salk[1]
+junctions_0 = fread(file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.junctions.merged.bed')))
+
+opts <- list(.options.multicore=list(preschedule=FALSE))
+junctions_dt = rbindlist(alply(sample_id_salk,1,function(ecotypeid) {
+    junctions_bed = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,".bam.junctions.merged.bed"))
+    if (file.exists(junctions_bed) & file.info(junctions_bed)$size>0) {
+        dt = fread(junctions_bed)
+        setnames(dt,
+                 c("chr","start","end",
+                   "strand","motif","annot","UM","MM",
+                   "max_overhang"))
+        dt = dt[,jid:=paste0(chr,":",start,"-",end,"_",strand)]
+        return(cbind(tg_ecotypeid=ecotypeid,dt))
+    }
+},.parallel=TRUE,.paropts=opts))
+  
+junctions_acc = junctions_dt[,list(UM=sum(UM),MM=sum(MM),
+    annot=annot[1],motif=motif[1]),
+    by=c("tg_ecotypeid","chr","start","end","strand","jid")]
+  
+save(junctions_dt,file=paste0(rdata_prefix,'junctions_dt.RData'))
+save(junctions_acc,file=paste0(rdata_prefix,'junctions_acc.RData'))
+
+rm(junctions_dt,junctions_acc)
+@
+
+<<load_junctions_dt,cache=FALSE>>=
+load(paste0(rdata_prefix,'junctions_dt.RData'))
+load(paste0(rdata_prefix,'junctions_acc.RData'))
+@
+
+<<bam_mapped_dt>>=
+bam_mapped_dt = fread(rmake_bam_mapped_file)
+bam_mapped_dt[,tg_ecotypeidx:=paste0("X",tg_ecotypeid)]
+@
+
+<<star_junc_code>>=
+annot_names = c("0"="unannotated","1"="annotated")
+motif_names = c("0"="NC","1"="GT/AG",
+                   "2"="CT/AC","3"="GC/AG","4"="CT/GC",
+                   "5"="AT/AC","6"="GT/AT")
+@ 
+
+<<intron_by_acc>>=
+intron_by_acc = junctions_acc[,list(n_acc=.N,UM_med=median(as.numeric(UM)),
+    UM_min=min(as.numeric(UM)),
+    annot=annot[1],motif=motif[1]),
+    by=c("chr","start","end","strand")]
+
+intron_by_acc = junctions_acc[UM>=2,list(n_acc=.N,UM_med=median(as.numeric(UM)),
+    UM_min=min(as.numeric(UM)),
+    annot=annot[1],motif=motif[1]),
+    by=c("chr","start","end","strand")]
+@
+
+<<intron_type_distr,fig.width=4,fig.height=3>>=
+intron_annot_total = intron_by_acc[UM_min>=2 & n_acc>=2,.N,by=c("annot")]
+intron_annot_total = intron_by_acc[n_acc>=2,.N,by=c("annot")]
+
+p4a = ggplot(intron_by_acc[n_acc>=2,],aes(x=factor(annot)))
+p4b = p4a + geom_bar(aes(fill=factor(motif)),width=0.5) +
+    geom_text(aes(x=factor(annot),y=N+1000,label=N),data=intron_annot_total,size=1.5,vjust=0)
+p4c = p4b + scale_x_discrete("",breaks=c(0,1),labels=c("unannotated","annotated")) +
+    scale_fill_discrete("Motif",breaks=0:6,labels=motif_names) +
+    scale_y_continuous("Number of junctions",limits=c(0,160000)) +
+    theme_bw() +
+    theme(axis.text.x=element_text(size=5,angle=45,hjust=1),
+          axis.text.y=element_text(size=5),
+          axis.title.y=element_text(size=6),
+          legend.text=element_text(size=5),
+          legend.title=element_text(size=6),
+          legend.key.size=unit(0.5,"line"))
+          
+pdf(paste0(prefix.string,'intron_type_distr.pdf'),width=1.8,height=1.5)
+print(p4c)
+dev.off()
+@ 
+
+
+<<intron_by_acc_plot,fig.width=6,fig.height=3>>=
+junc_labeller <- function(var, value){
+    print(var)
+    value <- as.character(value)
+    if (var=="annot") {
+        return(annot_names[value])
+    } else if (var=="motif") {
+       return(motif_names[value])
+    }    
+}
+
+njuncs_dt = intron_by_acc[UM_med>=2 & n_acc>=2,.N,by=c("annot")]
+print(njuncs_dt)
+
+p1a = ggplot(data=intron_by_acc[UM_med>=2 & n_acc>=2,],aes(x=UM_med,y=n_acc))
+p1b = p1a + stat_bin2d(bins=50) + facet_grid(.~annot,labeller=labeller(annot=annot_names)) +
+  geom_text(data=njuncs_dt,aes(x=10000,y=50,label=paste("n =",N),
+                               hjust=0.6,vjust=0.5))
+p1c = p1b + scale_x_log10("Median uniquely mapped reads across junction",
+                          breaks=trans_breaks("log10", function(x) 10^x)) +
+    ylab("Number of accessions") +
+    scale_fill_gradientn("Number of\njunctions",colours=tim.colors(50)) +
+    theme_bw() +
+    theme(axis.text.x=element_text(angle=30,hjust=1))
+print(p1c)
+@ 
+
+<<intron_per_acc>>=
+intron_per_acc = junctions_acc[,list(n_junc=.N,UM_med=median(as.numeric(UM))),
+                               by=c("tg_ecotypeid","motif","annot")]
+intron_per_acc[,motif_annot:=paste0(motif,"_",annot)]
+
+intron_per_acc = merge(intron_per_acc,bam_mapped_df[,c('tg_ecotypeid','MAPPED')],
+    by=c("tg_ecotypeid"))
+@
+
+<<acc_intron_hist_by_motif,fig.width=6.5,fig.height=3>>=
+p2a = ggplot(data=intron_per_acc[UM_med>=2,],aes(x=n_junc))
+p2b = p2a + geom_histogram(fill="grey20") + 
+  facet_grid(annot~motif,scales="free",labeller=labeller(annot=annot_names,motif=motif_names))
+p2c = p2b + 
+  xlab("Number of junctions found in an accession") +
+  ylab("Number of accessions") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+print(p2c)
+@
+
+<<intron_acc_hist_annot1,fig.width=2.5,fig.height=6>>=
+p3a = ggplot(data=intron_by_acc[UM_med>=2 & annot==1 & n_acc>=2,],aes(x=n_acc))
+p3b = p3a + geom_histogram(fill="grey20") + 
+  facet_grid(motif~annot,scales="free",labeller=labeller(annot=annot_names,motif=motif_names))
+p3c = p3b + 
+  xlab("Number of accessions\nwith the junction") +
+  ylab("Number of junctions") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p3c)
+@
+
+<<intron_acc_hist_annot0,fig.width=2.5,fig.height=6>>=
+p3c %+% intron_by_acc[UM_med>=2 & annot==0 & n_acc>=2,]
+@
+
+<<intron_vs_mapped,fig.width=3.5,fig.height=6,eval=FALSE>>=
+p5a = ggplot(data=intron_per_acc[UM_med>=2,],aes(x=MAPPED,y=n_junc))
+p5b = p5a + geom_point() +
+    facet_grid(motif~annot,scales="free_y",labeller=junc_labeller)
+p5c = p5b + scale_x_log10("Number of mapped reads",
+                     breaks = trans_breaks("log10", function(x) 10^x)) +
+     ylab("Number of junctions") +
+    theme_bw() +
+    theme(axis.text.x=element_text(angle=30,hjust=1))
+print(p5c)
+@ 
+
+<<junction_pca>>=
+junctions_dt = junctions_dt[,jid:=paste0(chr,":",start,"-",end,"_",strand)]
+
+jid_use = intron_by_acc[n_acc>=50 & UM_med>=2,paste0(chr,":",start,"-",end,"_",strand)]
+
+jdt_wide = reshape(junctions_dt[,list(jid,UM)],idvar="jid",
+@ 
+
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

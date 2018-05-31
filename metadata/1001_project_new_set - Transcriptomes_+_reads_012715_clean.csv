@@ -1,0 +1,49 @@
+Plate	Position	Pool #	Accession Number	Accession Name	Index #	Index	Lib Conc (ng/ul)	25NG_(ul)	Total_DNA vol_(ul)	EB_(ul)	Total_vol_for final_conc (1.7ng/ul)	Total_ng/pool		READS THEY HAVE
+#1_+_reads	A01		6390	Udul3-36	1	ATCACG	1.24							
+#1_+_reads	B01		6424	ZdrI 1-23	2	CGATGT	4.42							
+#1_+_reads	C01		6434	ZdrI 2-9	3	TTAGGC	3.3							
+#1_+_reads	D01		9911	ARGE-1-15	4	TGACCA	2.25							
+#1_+_reads	E01		9913	CON-7	5	ACAGTG	2.43							
+#1_+_reads	F01		9949	Qui-0	6	GCCAAT	3.34							
+#1_+_reads	G01		9705	Choto-1	7	CAGATC	9.16							
+#1_+_reads	H01		8584	328ME059	8	ACTTGA	9.25							
+#1_+_reads	A03		9996	Nie1-2	9	GATCAG	3.21							
+#1_+_reads	B03		9654	Liri-1	10	TAGCTT	3.83							
+#1_+_reads	C03		9707	Podvi-1	11	GGCTAC	0.87	redo						
+#1_+_reads	D03		9759	Anz-0	12	CTTGTA	0.56	redo						
+#1_+_reads	E03		9669	Mitterberg-2-185	13	AGTCAA	1.71							
+#1_+_reads	F03		108	LDV-18	14	AGTTCC	0.42	redo						
+#1_+_reads	G03		9673	Mitterberg-3-189	15	ATGTCA	0.51	redo						
+#1_+_reads	H03		9754	Sredn-1	16	CCGTCC	8.78							
+#1_+_reads	A05		9651	Filet-1	18	GTCCGC	2.94							
+#1_+_reads	B05		5818	UKID114	19	GTGAAA	0.78	redo						
+#1_+_reads	C05		9979	Voeran-1	20	GTGGCC	7.49							
+#1_+_reads	D05		9709	Zerev-1-34	21	GTTTCG	1.77							
+#1_+_reads	E05		6960	Ren-11	22	CGTACG	0.74	redo						
+#1_+_reads	F05		9998	Star-8	23	GAGTGG	1.92							
+#1_+_reads	G05		9650	Corig-1	25	ACTGAT	2.85							
+#1_+_reads	H05		9730	Bela-1	27	ATTCCT	3.09							
+#1_+_reads	A07		9662	Stilo-1	1	ATCACG	3.6							
+#1_+_reads	B07		9682	Castelfed-1-198	2	CGATGT	3.89							
+#1_+_reads	C07		9931	MOU2-25	3	TTAGGC	6.22							
+#1_+_reads	D07		9959	Shigu-2	4	TGACCA	6.27							
+#1_+_reads	E07		8351	Ost-0	5	ACAGTG	2.64							
+#1_+_reads	F07		9735	Bela-4	6	GCCAAT	0.5	redo						
+#1_+_reads	G07		9732	Halca-1	7	CAGATC	0.87	redo						
+#1_+_reads	H07		9710	Zerev-1-35	8	ACTTGA	2.23							
+#1_+_reads	A09		9725	Epidauros-1	9	GATCAG	1.03	redo						
+#1_+_reads	B09		9934	QUI-8	10	TAGCTT	2.75							
+#1_+_reads	C09		9746	Malii-1	11	GGCTAC	6.45							
+#1_+_reads	D09		9933	VED-10	12	CTTGTA	1.7							
+#1_+_reads	E09		9717	Kardz-2	13	AGTCAA	1.85							
+#1_+_reads	F09		5893	DraIV 1-11	14	AGTTCC	2.45							
+#1_+_reads	G09		9913	CON-7	15	ATGTCA	1.13	redo						
+#1_+_reads	H09		5535	UKNW06-354	16	CCGTCC	12.99							
+#1_+_reads	A11		9079	Lerik2-1	18	GTCCGC	2.65							
+#1_+_reads	B11		8357	Pla-0	19	GTGAAA	3.52							
+#1_+_reads	C11		159	MAR2-3	20	GTGGCC	0.87	redo						
+#1_+_reads	D11		8077	PT2.21	21	GTTTCG	0.78	redo						
+#1_+_reads	E11		9067	Xan-3	22	CGTACG	0.51	redo						
+#1_+_reads	F11		6957	Pu2-8	23	GAGTGG	4.5							
+#1_+_reads	G11		9908	ESP-1-11	25	ACTGAT	1.34							
+#1_+_reads	H11		7521	Lp2-6	27	ATTCCT	1.58							

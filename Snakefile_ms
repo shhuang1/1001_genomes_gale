@@ -1,0 +1,42 @@
+import csv
+import glob
+import gzip
+import itertools
+import os
+from pathlib import Path
+import re
+
+# Define SEPINC as shell environment variable
+SNAKERULES = os.environ.get('SNAKERULES')
+PROJ_NAME = "1001_genomes"
+DEPDIR = "deps"
+include:
+    SNAKERULES + "/Doc.defs.top"
+
+# 1001 Epigenomes - restructured manuscript, 2016-05-03
+rule ms_restructured_tableS3:
+     input: PROJ_RESULTS_PATH_GALE+'/make_ms_tables_2016-05-03/make_ms_tables_2016-05-03-DEG_FDR5.xlsx'
+     output: PROJ_RESULTS_PATH_GALE+'/ms_restructured_tables/TableS3.xlsx'
+     shell: "cp {input} {output}"
+     
+rule ms_restructured_tableS4:
+     input: PROJ_RESULTS_PATH_GALE+'/make_ms_tables_2016-05-03/make_ms_tables_2016-05-03-WGCNA_mod.xlsx'
+     output: PROJ_RESULTS_PATH_GALE+'/ms_restructured_tables/TableS4.xlsx'
+     shell: "cp {input} {output}"     
+
+rule ms_restructured_tables:
+    input: expand(PROJ_RESULTS_PATH_GALE+'/ms_restructured_tables/{tbl}',tbl=['TableS3.xlsx','TableS4.xlsx'])
+
+# 1001 Epigenomes - revision manuscript, 2016-06-15
+rule ms_revision_tableS3:
+     input: PROJ_RESULTS_PATH_GALE+'/make_ms_tables_2016-06-15/make_ms_tables_2016-06-15-DEG_FDR5_and_WGCNA.xlsx'
+     output: PROJ_RESULTS_PATH_GALE+'/ms_revision_tables/TableS3.xlsx'
+     shell: "cp {input} {output}"
+
+rule ms_revision_tableS4:
+     input: PROJ_RESULTS_PATH_GALE+'/make_ms_tables_2016-06-15/make_ms_tables_2016-06-15-eQTL_eQTLepi.xlsx'
+     output: PROJ_RESULTS_PATH_GALE+'/ms_revision_tables/TableS4.xlsx'
+     shell: "cp {input} {output}"     
+
+rule ms_revision_tables:
+    input: expand(PROJ_RESULTS_PATH_GALE+'/ms_revision_tables/{tbl}',tbl=['TableS3.xlsx','TableS4.xlsx'])

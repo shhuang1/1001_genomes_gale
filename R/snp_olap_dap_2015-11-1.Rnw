@@ -1,0 +1,113 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(NMF)
+library(plyr)
+library(RColorBrewer)
+library(R.utils)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"snp_olap_dap_2015-11-16")
+prefix.string = file.path(this_analysis_path,"graphics","snp_olap_dap_2015-11-16-")
+rdata_prefix = file.path(this_analysis_path,'snp_olap_dap_2015-11-16-')
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/snp_olap_dap_2015-11-16-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'pca_group1_na') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 genome SNP overlap with DAP}
+\date{November 16, 2014}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(22)
+getDoParWorkers()
+@
+
+<<>>=
+ecotype_list = list.dirs('/gale/netapp/home/shhuang/projects/1001_genomes/bedanno_dap_01',recursive=FALSE)
+
+bedanno_sum = llply(ecotype_list,function(acc) {
+    bedanno = fread(file.path(acc,'intersection_snp_short_indel.bed'))
+    bedanno_ncol = ncol(bedanno)
+    bedanno_colsum = bedanno[,lapply(.SD,sum),.SDcols=paste0("V",11:bedanno_ncol)]
+    bedanno_colsum[,`:=`(nRow=nrow(bedanno),nCol=ncol(bedanno))]
+},.parallel=TRUE)
+
+bedanno_dapfam = llply(seq_along(ecotype_list),function(acci) {
+    acc = ecotype_list[[acci]]
+    dap_fam_file = fread(file.path(acc,'intersection_snp_short_indel.samples'),header=FALSE)
+    dap_fam_id = sub("/chr1-5_GEM_events.narrowPeak.fimo0_1e-4.bed2",".motifs",
+        sub("/encode_cluster_01.bed2",".peaks",
+            sub("/gale/netapp/home/shhuang/projects/dap/analysis.v4/family_cluster_01/","",dap_fam_file[,V1])))
+    dap_fam_id
+},.parallel=TRUE)
+
+for (acci in seq_along(ecotype_list)) {
+    setnames(bedanno_sum[[acci]],paste0("V",11:bedanno_sum[[acci]][,nCol]),
+             bedanno_dapfam[[acci]])
+}
+
+bedanno_dapfam1 = bedanno_dapfam[[1]]
+bedanno_dapfam1_peaks = grep(".peaks",bedanno_dapfam1,value=TRUE)
+bedanno_dapfam1_motifs = grep(".motifs",bedanno_dapfam1,value=TRUE)
+
+bedanno_sum_mat = rbindlist(llply(bedanno_sum,function(acc) {
+    acc[,c(bedanno_dapfam1,"nRow"),with=FALSE]
+},.parallel=TRUE))
+
+pdf(paste0(prefix.string,'aaa_peaks.pdf'))
+aheatmap(bedanno_sum_mat[,setdiff(bedanno_dapfam1_peaks,"master.peaks"),with=FALSE],col="Reds",hclustfun="ward.D2")
+dev.off()
+
+pdf(paste0(prefix.string,'aaa_motifs.pdf'),width=7,height=5)
+aheatmap(bedanno_sum_mat[,setdiff(bedanno_dapfam1_motifs,"master.motifs"),with=FALSE],annRow=bedanno_sum_mat[,list(nSNP=nRow,nSNP_DAP=master.motifs)],
+         col="Reds",hclustfun="ward.D2")
+dev.off()
+
+@ 
+
+<<sessionInfo>>=    
+sessionInfo()
+@
+
+\end{document}

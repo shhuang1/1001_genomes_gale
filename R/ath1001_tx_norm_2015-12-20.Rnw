@@ -1,0 +1,556 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(car)
+library(corrplot)
+library(data.table)
+library(doMC)
+library(EDASeq)
+library(edgeR)
+library(gdata)
+library(ggplot2)
+library(goftest)
+library(plyr)
+library(RColorBrewer)
+library(RSkittleBrewer)
+library(R.utils)
+library(RUVSeq)
+library(S4Vectors)
+library(sva)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+ath1001_bg_all = file.path(PROJ_RESULTS_PATH,'ath1001_tx_ballgown_2015-12-05','graphics','ath1001_tx_ballgown_2015-12-05-all.rda')
+ath1001_htseq_all = file.path(PROJ_RESULTS_PATH,'ath1001_tx_htseq_count_2015-12-07','graphics','ath1001_tx_htseq_count_2015-12-07-count.txt')
+ath1001_htseq_all_chr = file.path(PROJ_RESULTS_PATH,'ath1001_tx_htseq_count_2015-12-07','graphics','ath1001_tx_htseq_count_2015-12-07-count_chr.txt')
+
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2015-12-20_2")
+prefix.string = file.path(this_analysis_path,"graphics","ath1001_tx_norm_2015-12-20-")
+rdata_prefix = file.path(this_analysis_path,"ath1001_tx_norm_2015-12-20-")
+step_list = c("RUVs21ref_by_repDE","RUVsAllgenes_by_repDE")
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache.rebuild = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/ath1001_tx_norm_2015-12-20-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Create ballgown object for 1001 transcriptomes}
+\date{December 5, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+
+<<load_counts>>=
+hts_count = as.matrix(read.table(ath1001_htseq_all,sep='\t',header=TRUE,row.names=1))
+gene_names = rownames(hts_count)
+hts_count_chr = fread(ath1001_htseq_all_chr,sep='\t',header=TRUE)
+gene_names_chr = hts_count_chr[,V1]
+
+ss = function(x, pattern, slot=1,...) sapply(strsplit(x,pattern,...), "[", slot)
+
+## phenotype data
+pd = pd_1001g
+pd$sample_id = as.character(pd$tg_ecotypeid)
+
+## extract transcript data
+tName = rownames(hts_count)
+#gownTransFPKM =  texpr(bg, "FPKM")
+#colnames(gownTransFPKM) = ss(colnames(gownTransFPKM),"\\.",2)
+#gownTransFPKM = gownTransFPKM[,pd$dirname] # put in same order post-drop
+#gownTransMap = structure(bg)$trans
+#rownames(gownTransFPKM) = names(gownTransMap) = tName
+
+### mean filter: only keep transcripts with FPKM>0.1
+#mmTrans = rowMeans(gownTransFPKM) 
+#keepIndex=which(mmTrans > 0.1)
+#gownTransMap2 = gownTransMap[keepIndex]
+#validQuantileSamp = apply(gownTransFPKM[keepIndex,],2,function(x) quantile(x,p=0.75))>0
+#gownTransFPKM2 = gownTransFPKM[keepIndex,validQuantileSamp]
+#pd2 = pd[validQuantileSamp,]
+
+ath_19acc_21ref = fread(ath_19acc_21ref_file)
+@
+
+Take different min count thresholds, plot histogram of number of genes expressed in each number of accessions.  The histogram seems to be quite stable across thresholds from 1 to 5 counts, with bulk of accessions having around 20,000 expressed genes.
+<<acc_ngenes>>=
+try_min_count = 1:10
+
+ngenes_by_acc = rbindlist(alply(try_min_count,1,function(co) {
+  data.table(min_count=co,tg_ecotypeidx=colnames(hts_count),ngenes=colSums(hts_count>=co))
+}))
+p1a = ggplot(ngenes_by_acc,aes(x=ngenes))
+p1b = p1a + geom_histogram() +
+  facet_wrap(~min_count,scale="free_x") 
+p1c = p1b + xlab("Number of expressed genes") +
+  ylab("Number of accessions") + theme_bw()
+print(p1c)
+@
+
+Take different min count thresholds, plot histogram of the number of expressed genes for the number of accessions.  All show bimodal distribution, with ~15,000 genes expressed in >600 accessions and and a few thousand genes expressed in less than 200 accessions. A 5\% accession cutoff (red vertical line) seems to take out most of the unexpressed genes. Decided to take a count threshold of 5 and min number of accessions to be 5\% of total number of accessions
+<<genes_nacc>>=
+try_min_count = 1:10
+
+genes_by_nacc = rbindlist(alply(try_min_count,1,function(co) {
+  data.table(min_count=co,gene=rownames(hts_count),
+             nacc=rowSums(hts_count>=co),
+             nacc_total=ncol(hts_count))
+}))
+p2a = ggplot(genes_by_nacc,aes(x=nacc))
+p2b = p2a + geom_histogram() + geom_vline(aes(xintercept=0.05*nacc_total,col="red")) +
+  facet_wrap(~min_count,scale="free_x") 
+p2c = p2b + xlab("Number of accessions") +
+  ylab("Number of expressed genes") + theme_bw()
+print(p2c)
+@
+
+
+<<min_filter>>=
+min_count = 5
+min_sample = ncol(hts_count)*0.05
+### min filter: only keep genes expressed in at least 5% samples
+filter = apply(hts_count, 1, function(x) length(x[x>=min_count])>min_sample)
+
+validQuartileSamp = apply(hts_count[filter,],2,function(x) quantile(x,p=0.75))>0
+validGenomeSamp = colnames(hts_count) %in% make.names(acc_list_1001g[seq_by=='Mott',tg_ecotypeid])
+hts_count2 = hts_count[filter,validQuartileSamp & validGenomeSamp]
+gene_names2 = rownames(hts_count2)
+
+pd2 = pd[match(colnames(hts_count2),make.names(pd[,sample_id])),]
+pd2[,c("plate_batch1","plate_batch2","plate_batch3","plate_batch4"):=(salk_tx_platebatch[match(pd2[,tg_ecotypeid],salk_tx_platebatch[,tg_ecotypeid]),list(plate_batch1,plate_batch2,plate_batch3,plate_batch4)])]
+@
+
+
+<<uq>>=
+uq = betweenLaneNormalization(hts_count2,which="upper")
+
+col = c("black",brewer.pal(12,"Paired"))
+col_batch_a = list('b1'=rev(brewer.pal(9,"Reds")),
+                   'b2'=rev(brewer.pal(9,"Blues")),
+                   'b3'=rev(brewer.pal(9,"Greens"))
+)
+pch_batch_a = list('b1'=21,
+                   'b2'=22,
+                   'b3'=23)
+grp_a = brewer.pal(10,"Set3")
+names(grp_a) = unique(pd2[,group])
+pd2_include = pd2[,!is.na(plate_batch2)]
+par_batch = adply(pd2[pd2_include,],1,function(df) {
+  data.table(col01=col_batch_a[[df[1,plate_batch2]]][df[1,plate_batch4]],
+             pch01=pch_batch_a[[df[1,plate_batch2]]],
+             grp01=grp_a[df[1,group]])
+})
+
+plotRLE(uq[,pd2_include],
+        col=par_batch[,col01],outline=FALSE, 
+        las=3, ylab="Relative Log Expression", cex.axis=1, cex.lab=1)
+
+plotPCA(uq[,pd2_include],
+        pch=par_batch[,pch01],
+        bg=par_batch[,col01], labels=FALSE,
+        cex=1, cex.axis=1, cex.lab=1)
+
+plotPCA(uq[,pd2_include],
+        pch=par_batch[,pch01],
+        bg=par_batch[,grp01], labels=FALSE,
+        cex=1, cex.axis=1, cex.lab=1)
+@
+
+<<test_RUVg_by_repDE,cache=FALSE>>= 
+test_RUVg_by_repDE<-function(tx_info,group_col,try_k,ref_genes,test_genes) {
+    rg_de_cmp = alply(try_k,1,function(k) {
+        print(k)
+        dlply(tx_info,"tg_ecotypeid",function(df0) {
+            
+            df = unique(df0[,c('tg_ecotypeid','fc_short',group_col)])
+            
+            x = do.call("cbind",alply(df,1,function(each_fc) {
+                print(each_fc)
+                gene_count_file = with(each_fc,file.path(tfq_gale2_path,tg_ecotypeid,
+                                                         paste0(tg_ecotypeid,'_',fc_short,'.bam.gene.count')))
+                dt = fread(gene_count_file)
+                return(dt[match(gene_names_chr,dt[,V1]),V2])
+            }))
+            valid_quartile_x = apply(x,2,function(xi) quantile(xi,p=0.75))>0
+            x = x[,valid_quartile_x]
+            colnames(x) = df[,'fc_short'][valid_quartile_x]
+            rownames(x) = gene_names
+            x = x[test_genes,]
+            group = df[,group_col][valid_quartile_x]
+            print(df[1,'tg_ecotypeid'])
+            print(paste(length(unique(group)),min(table(group)),k+length(unique(group)),ncol(x)))
+                    
+            if (length(unique(group))>1 && min(table(group))>1 && (k+length(unique(group)))<ncol(x)) {
+                
+                y = DGEList(counts=x,group=group)
+                design = model.matrix(~group)
+                y = calcNormFactors(y,method="upperquartile")
+                y = estimateGLMCommonDisp(y,design,verbose=TRUE)
+                y = estimateGLMTagwiseDisp(y,design)
+                fit = glmFit(y,design)
+                
+                target_coef = ifelse(rep(ncol(design)==2,times=ncol(design)-1),2,2:ncol(design))
+                print(design)
+                print(paste('target_coef',target_coef))
+                lrt = glmLRT(fit,coef=target_coef)
+                topUQFC = topTags(lrt,n=Inf)$table
+                
+                gNorm = RUVg(x,ref_genes,k=k)
+                y = DGEList(counts=x,group=group)
+                print(dim(gNorm$W))
+                design = model.matrix(~group + gNorm$W)
+                y = calcNormFactors(y,method="upperquartile")
+                y = estimateGLMCommonDisp(y,design,verbose=TRUE)
+                y = estimateGLMTagwiseDisp(y,design)
+                fit = glmFit(y,design)
+                lrt = glmLRT(fit, coef=target_coef)
+                topRgFC = topTags(lrt, n=Inf)$table  
+            } else {
+                topUQFC = NA
+                topRgFC = NA
+            }
+            list(topUQFC=topUQFC,topRgFC=topRgFC)
+        },.parallel=TRUE) 
+    })
+    names(rg_de_cmp) = try_k
+    rg_de_cmp
+}
+@ 
+
+<<plot_phist,cache=FALSE>>=
+plot_phist<-function(rg_de_cmp,fig.oma,fig.title,max_p=0.1) {
+    
+    try_k = names(rg_de_cmp)
+    print(length(try_k))
+    #par(mfrow=c(2,length(try_k)))
+    par(mfrow=c(length(try_k),2),oma=fig.oma)
+    
+    # for each k, for each normalization, plot histogram of fraction of genes with p-value
+    # less than specified thresholds
+    for (k in try_k) {
+        print(k)
+        
+        for (norm_name in c("topUQFC","topRgFC")) {
+            print(norm_name)
+            
+            norm_p = laply(rg_de_cmp[[k]],function(acc_norm) {
+                if (is.na(acc_norm[[norm_name]])) {
+                    return(NA)
+                } else {
+                    #return(ad.test(with(acc_norm[[norm_name]],PValue))$p.value)
+                    return(with(acc_norm[[norm_name]],sum(PValue<=max_p)/length(PValue)))
+                }
+            },.parallel=TRUE)
+            
+            #print(norm_p)
+            if (any(!is.na(norm_p))) {
+                hist(norm_p,main=paste0("k=",k,", ",norm_name),breaks=seq(0,1,by=0.05))
+            } else {
+                plot(1, type="n", axes=F, xlab="", ylab="")                
+            }
+        }
+    }
+    title(fig.title,outer=TRUE)
+    # dev.off()
+}
+@ 
+
+<<RUVg_21ref_by_repDE,cache=FALSE>>=
+try_k = c(1,2,3,4,5,6,10,12,15)
+tx_ecotype_N = copy(salk_tx_info)
+
+tx_ecotype_N[,`:=`(pb2_N=length(unique(plate_batch2)),
+                   fc_N=length(unique(fc_short)),
+                   Plate_N=length(unique(Plate))),
+                  by="tg_ecotypeid"]
+tx_fc_N = copy(salk_tx_info)
+tx_fc_N[,plate_batch1:=paste(sort(unique(Plate)),collapse=","),
+        by=c("tg_ecotypeid","fc_short")]
+tx_fc_N[,`:=`(pb1_N=length(unique(plate_batch1))),by="tg_ecotypeid"]
+
+if ("RUVg_21ref_by_repDE" %in% step_list) {
+
+    RUVg21ref_DEPlateBat2_N2 = test_RUVg_by_repDE(tx_ecotype_N[pb2_N==2,],
+                                                  'plate_batch2',1:6,
+                                                  ath_19acc_21ref[,AGI],
+                                                  gene_names2)
+    RUVg21ref_DEPlateBat2_N3 = test_RUVg_by_repDE(tx_ecotype_N[tg_ecotypeid=='9710',],
+                                                  'plate_batch2',1:6,
+                                                  ath_19acc_21ref[,AGI],
+                                                  gene_names2)
+    RUVg21ref_DEPlateBat2_N23 = test_RUVg_by_repDE(tx_ecotype_N[pb2_N>=2,],
+                                                   'plate_batch2',1:6,
+                                                   ath_19acc_21ref[,AGI],
+                                                   gene_names2)
+    
+    pdf(paste0(prefix.string,'RUVg21ref_by_repDE-DEPlateBat2.pdf'),width=6,height=12)
+    plot_phist(RUVg21ref_DEPlateBat2_N2,fig.oma=c(0,0,1,0),fig.title="RUVg21ref_DEPlateBat2_N2")
+    plot_phist(RUVg21ref_DEPlateBat2_N3,fig.oma=c(0,0,1,0),fig.title="RUVg21ref_DEPlateBat2_N3")
+    plot_phist(RUVg21ref_DEPlateBat2_N23,fig.oma=c(0,0,1,0),fig.title="RUVg21re_DEPlateBat2_N23")
+    dev.off()    
+
+    RUVg21ref_DEPlateBat1_N2 = test_RUVg_by_repDE(tx_fc_N[pb1_N==2,],
+                                                  'plate_batch1',1:6,
+                                                  ath_19acc_21ref[,AGI],
+                                                  gene_names2)
+    RUVg21ref_DEPlateBat1_N23 = test_RUVg_by_repDE(tx_fc_N[pb1_N>=2,],
+                                                   'plate_batch1',1:6,
+                                                   ath_19acc_21ref[,AGI],
+                                                   gene_names2)
+    
+    pdf(paste0(prefix.string,'RUVg21ref_by_repDE-DEPlateBat1.pdf'),width=6,height=12)
+    plot_phist(RUVg21ref_DEPlateBat1_N2,fig.oma=c(0,0,1,0),fig.title="RUVg21ref_DEPlateBat1_N2")
+    plot_phist(RUVg21ref_DEPlateBat1_N23,fig.oma=c(0,0,1,0),fig.title="RUVg21ref_DEPlateBat2_N23")
+    dev.off()
+
+    if ("save_results" %in% step_list) {
+    
+        save(RUVg21ref_DEPlateBat2_N2,RUVg21ref_DEPlateBat2_N3,RUVg21ref_DEPlateBat2_N23,
+             RUVg21ref_DEPlateBat1_N2,RUVg21ref_DEPlateBat1_N23,
+             file=paste0(rdata_prefix,'RUVg21ref_DE.Rdata'))   
+    }
+} else {
+    
+    load(paste0(rdata_prefix,'RUVg21ref_DE.Rdata'))
+}
+@
+
+<<test_RUVs_by_repDE,cache=FALSE>>=
+test_RUVs_by_repDE<-function(tx_info,group_col,try_k,ref_genes,test_genes) {
+    
+    rg_de_cmp = alply(try_k,1,function(k) {
+        print(k)
+        dlply(tx_info,"tg_ecotypeid",function(df0) {
+            
+            df = unique(df0[,c('tg_ecotypeid','fc_short',group_col)])
+            
+            x = do.call("cbind",alply(df,1,function(each_fc) {
+                print(each_fc)
+                gene_count_file = with(each_fc,file.path(tfq_gale2_path,tg_ecotypeid,
+                                                         paste0(tg_ecotypeid,'_',fc_short,'.bam.gene.count')))
+                dt = fread(gene_count_file)
+                return(dt[match(gene_names_chr,dt[,V1]),V2])
+            }))
+            valid_quartile_x = apply(x,2,function(xi) quantile(xi,p=0.75))>0
+            x = x[,valid_quartile_x]
+            colnames(x) = df[,'fc_short'][valid_quartile_x]
+            rownames(x) = gene_names
+            x = x[test_genes,]
+            group = df[,group_col][valid_quartile_x]
+            print(df[1,'tg_ecotypeid'])
+            print(paste(length(unique(group)),min(table(group)),k+length(unique(group))),ncol(x))
+                    
+            if (length(unique(group))>1 && min(table(group))>1 && (k+length(unique(group)))<ncol(x)) {
+                
+                y = DGEList(counts=x,group=group)
+                design = model.matrix(~group)
+                y = calcNormFactors(y,method="upperquartile")
+                y = estimateGLMCommonDisp(y,design,verbose=TRUE)
+                y = estimateGLMTagwiseDisp(y,design)
+                fit = glmFit(y,design)
+                
+                target_coef = ifelse(rep(ncol(design)==2,times=ncol(design)-1),2,2:ncol(design))
+                print(design)
+                print(paste('target_coef',target_coef))
+                lrt = glmLRT(fit,coef=target_coef)
+                topUQFC = topTags(lrt,n=Inf)$table
+                
+                group_df = ddply(data.frame(group=group,idx=1:length(group)),"group",function(df) {
+                    cbind(df,group_idx=1:nrow(df))
+                })
+                group_scIdx = reshape(group_df,idvar="group",timevar="group_idx",
+                                      v.names="idx",direction="wide")
+                rownames(group_scIdx) = group_scIdx[,'group']
+                group_scIdx[,'group'] = NULL
+                group_scIdx = as.matrix(NAToUnknown(group_scIdx,unknown=-1))
+                print(group_scIdx)
+                
+                sNorm = RUVs(x,ref_genes,k=k,scIdx=group_scIdx)
+                
+                y = DGEList(counts=x,group=group)
+                print(dim(sNorm$W))
+                design = model.matrix(~group + sNorm$W)
+                y = calcNormFactors(y,method="upperquartile")
+                y = estimateGLMCommonDisp(y,design,verbose=TRUE)
+                y = estimateGLMTagwiseDisp(y,design)
+                fit = glmFit(y,design)
+                lrt = glmLRT(fit, coef=target_coef)
+                topRgFC = topTags(lrt, n=Inf)$table  
+            } else {
+                topUQFC = NA
+                topRgFC = NA
+            }
+            list(topUQFC=topUQFC,topRgFC=topRgFC)
+        },.parallel=TRUE) 
+    })
+    names(rg_de_cmp) = try_k
+    rg_de_cmp
+}
+@ 
+
+<<RUVs21ref_by_repDE>>=
+if ("RUVs21ref_by_repDE" %in% step_list) {
+    
+    RUVs21ref_DEPlateBat2_N2 = test_RUVs_by_repDE(tx_ecotype_N[pb2_N==2,],
+                                                  'plate_batch2',1:6,
+                                                  ath_19acc_21ref[,AGI],
+                                                  gene_names2)
+    RUVs21ref_DEPlateBat2_N3 = test_RUVs_by_repDE(tx_ecotype_N[pb2_N==3,],
+                                                  'plate_batch2',1:6,
+                                                  ath_19acc_21ref[,AGI],
+                                                  gene_names2)
+    RUVs21ref_DEPlateBat2_N23 = test_RUVs_by_repDE(tx_ecotype_N[pb2_N>=2,],
+                                                   'plate_batch2',1:6,
+                                                   ath_19acc_21ref[,AGI],
+                                                   gene_names2)
+    
+    pdf(paste0(prefix.string,'RUVs21ref_by_repDE-DEPlateBat2.pdf'),width=6,height=12)
+    plot_phist(RUVs21ref_DEPlateBat2_N2,fig.oma=c(0,0,1,0),fig.title="RUVs21ref_DEPlateBat2_N2")
+    plot_phist(RUVs21ref_DEPlateBat2_N3,fig.oma=c(0,0,1,0),fig.title="RUVs21ref_DEPlateBat2_N3")
+    plot_phist(RUVs21ref_DEPlateBat2_N23,fig.oma=c(0,0,1,0),fig.title="RUVs21ref_DEPlateBat2_N23")
+    dev.off()
+
+    RUVs21ref_DEPlateBat1_N2 = test_RUVs_by_repDE(tx_fc_N[pb1_N==2,],
+                                                  'plate_batch1',1:6,
+                                                  ath_19acc_21ref[,AGI],
+                                                  gene_names2)
+    RUVs21ref_DEPlateBat1_N23 = test_RUVs_by_repDE(tx_fc_N[pb1_N>=2,],
+                                                   'plate_batch1',1:6,
+                                                   ath_19acc_21ref[,AGI],
+                                                   gene_names2)
+
+    pdf(paste0(prefix.string,'RUVs21ref_by_repDE-DEPlateBat1.pdf'),width=6,height=12)
+    plot_phist(RUVs21ref_DEPlateBat1_N2,fig.oma=c(0,0,1,0),fig.title="RUVs21ref_DEPlateBat1_N2")
+    plot_phist(RUVs21ref_DEPlateBat1_N23,fig.oma=c(0,0,1,0),fig.title="RUVs21ref_DEPlateBat1_N23")
+    dev.off()
+
+    if ("save_results" %in% step_list) {   
+    
+        save(RUVs21ref_DEPlateBat2_N2,RUVs21ref_DEPlateBat2_N3,RUVs21ref_DEPlateBat2_N23,
+             RUVs21ref_DEPlateBat1_N2,RUVs21ref_DEPlateBat1_N23,
+             file=paste0(rdata_prefix,'RUVs21ref_DE.Rdata'))
+        
+    }
+} else {
+    
+    load(paste0(rdata_prefix,'RUVs21ref_DE.Rdata'))
+}
+
+@ 
+
+<<RUVsAllgenes_by_repDE>>=
+if ("RUVsAllgenes_by_repDE" %in% step_list) {
+    
+    RUVsAllgenes_DEPlateBat2_N2 = test_RUVs_by_repDE(tx_ecotype_N[pb2_N==2,],
+                                                     'plate_batch2',1:6,
+                                                     gene_names2,gene_names2)
+    RUVsAllgenes_DEPlateBat2_N3 = test_RUVs_by_repDE(tx_ecotype_N[pb2_N==3,],
+                                                     'plate_batch2',1:6,
+                                                     gene_names2,gene_names2)
+    RUVsAllgenes_DEPlateBat2_N23 = test_RUVs_by_repDE(tx_ecotype_N[pb2_N>=2,],
+                                                      'plate_batch2',1:6,
+                                                      gene_names2,gene_names2)
+    
+    pdf(paste0(prefix.string,'RUVsAllgenes_by_repDE-DEPlateBat2.pdf'),width=6,height=12)
+    plot_phist(RUVsAllgenes_DEPlateBat2_N2,fig.oma=c(0,0,1,0),fig.title="RUVsAllgenes_DEPlateBat2_N2")
+    plot_phist(RUVsAllgenes_DEPlateBat2_N3,fig.oma=c(0,0,1,0),fig.title="RUVsAllgenes_DEPlateBat2_N3")
+    plot_phist(RUVsAllgenes_DEPlateBat2_N23,fig.oma=c(0,0,1,0),fig.title="RUVsAllgenes_DEPlateBat2_N23")
+    dev.off()
+
+    RUVsAllgenes_DEPlateBat1_N2 = test_RUVs_by_repDE(tx_fc_N[pb1_N==2,],
+                                                     'plate_batch1',1:6,
+                                                     gene_names2,gene_names2)
+    RUVsAllgenes_DEPlateBat1_N23 = test_RUVs_by_repDE(tx_fc_N[pb1_N>=2,],
+                                                      'plate_batch1',1:6,
+                                                      gene_names2,gene_names2)
+
+    pdf(paste0(prefix.string,'RUVsAllgenes_by_repDE-DEPlateBat1.pdf'),width=6,height=12)
+    plot_phist(RUVsAllgenes_DEPlateBat1_N2,fig.oma=c(0,0,1,0),fig.title="RUVsAllgenes_DEPlateBat1_N2")
+    plot_phist(RUVsAllgenes_DEPlateBat1_N23,fig.oma=c(0,0,1,0),fig.title="RUVsAllgenes_DEPlateBat1_N23")
+    dev.off()
+
+    if ("save_results" %in% step_list) {   
+    
+        save(RUVsAllgenes_DEPlateBat2_N2,RUVsAllgenes_DEPlateBat2_N3,RUVsAllgenes_DEPlateBat2_N23,
+             RUVsAllgenes_DEPlateBat1_N2,RUVsAllgenes_DEPlateBat1_N23,
+             file=paste0(rdata_prefix,'RUVsAllgenes_DE.Rdata'))    
+    } 
+} else {
+    load(paste0(rdata_prefix,'RUVsAllgenes_DE.Rdata'))
+}
+@
+
+<<sample_qq>>=
+try_k = 1:5
+try_acc = names(RUVg21ref_DEPlateBat2_N23[[5]])[sapply(RUVg21ref_DEPlateBat2_N23[[5]],function(acc) !is.null(dim(acc[['topUQFC']])))]
+
+ruv_list = list(RUVg21ref_DEPlateBat2=RUVg21ref_DEPlateBat2_N23,
+                RUVg21ref_DEPlateBat1=RUVg21ref_DEPlateBat1_N23,
+                RUVs21ref_DEPlateBat2=RUVs21ref_DEPlateBat2_N23,
+                RUVs21ref_DEPlateBat1=RUVs21ref_DEPlateBat1_N23,
+                RUVsAllgenes_DEPlateBat2=RUVsAllgenes_DEPlateBat2_N23,
+                RUVsAllgenes_DEPlateBat1=RUVsAllgenes_DEPlateBat1_N23)
+
+for (acc in try_acc) {
+    fig.file = paste0(prefix.string,'repDE_qqPlot_',acc,'.pdf')
+    print(fig.file)
+    pdf(fig.file,width=20,height=12)
+    par(mfrow=c(length(ruv_list),2*length(try_k)))
+    for (rn in names(ruv_list)) {
+        ruv = ruv_list[[rn]]
+        for (k in try_k) {
+            qqPlot(ruv[[k]][[acc]][['topUQFC']][,'PValue'],
+                   distribution="unif",main=paste('k=',k,'acc=',acc,'\n',rn,'topUQFC'),
+                   ylab="Replicate DE p-value quantiles")
+            qqPlot(ruv[[k]][[acc]][['topRgFC']][,'PValue'],
+                   distribution="unif",main=paste('k=',k,'acc=',acc,'\n',rn,'topRgFC'),
+                   ylab="Replicate DE p-value quantiles")
+        }
+    }
+    dev.off()
+}
+@ 
+
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

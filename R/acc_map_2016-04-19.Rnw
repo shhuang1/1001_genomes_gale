@@ -1,0 +1,107 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(Hmisc)
+library(plyr)
+library(R.utils)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"acc_map_2016-04-19")
+prefix.string = file.path(this_analysis_path,"graphics","acc_map_2016-04-19-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/acc_map_2016-04-19")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Mapped reads per accession}
+\date{April 19, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+Filter to common accessions with 1001 Genomes, then filter out methylation variants that have methylation genotyping rate less than 90\% and minor epiallele frequency less than 1\%.
+<<read_dms_tables>>=
+
+a_ply(dms_tables,1,function(m) {
+    a_ply(1:5,1,function(chrom) {
+        dms_file = file.path(dms_path,m,paste0(m,'_',chrom,'.tsv'))
+        print(dms_file)
+        dt0 = fread(dms_file,sep='\t',header=TRUE)
+        # methylated and unmethylated frequencies
+        acc = colnames(dt0)[6:ncol(dt0)]
+        accx = paste0("X",acc)
+        setnames(dt0,acc,accx)
+        accx_1001g = intersect(acc_list_1001g[,tg_ecotypeidx],accx)
+        dt_1001g = dt0[,c("chr","pos","pvalue",accx_1001g),with=FALSE]
+        dt_1001g[,`:=`(pvalue=NA,
+            n_methylated=rowSums(.SD==1,na.rm=TRUE),
+            n_unmethylated=rowSums(.SD==0,na.rm=TRUE),
+            n_total=ncol(.SD)),.SDcols=accx_1001g]
+        # epigenotyping rate
+        dt_1001g = dt_1001g[,n_geno:=n_methylated+n_unmethylated]
+        # allele frequencies
+        dt_1001g = dt_1001g[,`:=`(p_geno=n_geno/n_total,
+                                  mf=n_methylated/n_geno,
+                                  umf=n_unmethylated/n_geno)]
+        # minor allele frequency
+        dt_1001g = dt_1001g[,maf:=pmin(mf,umf)]
+        dt_out = dt_1001g[p_geno>=0.9 & maf>=0.01,
+                          c("chr","pos","pvalue","n_unmethylated","n_methylated",accx_1001g),with=FALSE]
+        setnames(dt_out,accx_1001g,sub("X","",accx_1001g))
+
+        write.table(dt_out,file.path(dms_path,m,paste0(m,'_',chrom,'_1001g_filter1.tsv')),sep='\t',
+                    col.names=TRUE,row.names=FALSE,quote=FALSE)
+    },.parallel=TRUE)
+})
+@ 
+
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

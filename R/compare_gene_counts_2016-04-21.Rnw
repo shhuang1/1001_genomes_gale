@@ -1,0 +1,115 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(plyr)
+library(R.utils)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"compare_gene_counts_2016-04-21")
+prefix.string = file.path(this_analysis_path,"graphics","compare_gene_counts_2016-04-21-")
+rdata_prefix = file.path(this_analysis_path,"compare_gene_counts_2016-04-21-")
+
+ath1001_htseq_nofilt = file.path(PROJ_RESULTS_PATH,'ath1001_tx_htseq_count_2015-12-07','graphics','ath1001_tx_htseq_count_2015-12-07-count.txt')
+ath1001_htseq_filt = file.path(PROJ_RESULTS_PATH,'ath1001_tx_htseq_count_2016-04-20','ath1001_tx_htseq_count_2016-04-20-count.tsv')
+step_list = "write_gene_count_mat"
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path='cache/compare_gene_counts_2016-04-21-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Comparing transcriptome gene counts with and without filtering low quality FASTQs}
+\date{April 21, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Gene count file with no filtering \\ \verb|\Sexpr{ath1001_htseq_nofilt}|.
+\item Gene count file with filtering \\ \verb|\Sexpr{ath1001_htseq_filt}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+\section{Read gene count matrices}
+
+<<read_count>>=
+count_nf = fread(ath1001_htseq_nofilt,header=TRUE)
+count_f = fread(ath1001_htseq_filt,header=TRUE)
+
+countmat_nf = count_nf[,-"V1",with=FALSE]
+setnames(countmat_nf,paste0("X",colnames(countmat_nf)))
+countmat_f = count_f[match(count_nf[,V1],V1),][,-"V1",with=FALSE]
+setnames(countmat_f,paste0("X",colnames(countmat_f)))
+
+common_acc = intersect(colnames(countmat_nf),colnames(countmat_f))
+@ 
+
+\section{Calculate correlation with and without filtering for each accession}
+
+<<count_pcor>>=
+count_pcor = cor(countmat_nf,countmat_f)
+
+count_pcor_common = count_pcor[common_acc,common_acc]
+
+count_pcor_by_acc = diag(count_pcor_common)
+
+hist(count_pcor_by_acc)
+
+count_pcor_by_acc[count_pcor_by_acc< (1-.Machine$double.eps)]
+@ 
+
+<<logcount_pcor>>=
+logcount_pcor = cor(log2(countmat_nf+1),log2(countmat_f+1))
+
+logcount_pcor_common = logcount_pcor[common_acc,common_acc]
+
+logcount_pcor_by_acc = diag(logcount_pcor_common)
+
+hist(logcount_pcor_by_acc)
+
+logcount_pcor_by_acc[logcount_pcor_by_acc< (1-.Machine$double.eps)]
+@ 
+
+
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

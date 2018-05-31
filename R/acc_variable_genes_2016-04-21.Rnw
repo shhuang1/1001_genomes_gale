@@ -1,0 +1,929 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(DESeq2)
+library(EDASeq)
+library(edgeR)
+library(gdata)
+library(genefilter)
+library(ggmap)
+library(ggplot2)
+library(gProfileR)
+library(NMF)
+library(pheatmap)
+library(RColorBrewer)
+library(R.utils)
+library(Vennerable)
+library(vsn)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+counts_mat_file = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-04-21",
+                           "ath1001_tx_norm_2016-04-21-filtered01_1001g.csv")
+ruvg_rdata_file = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-04-21","ath1001_tx_norm_2016-04-21-UQ_RUVg_21ref.RData")
+vsd_rdata_file = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-04-21","ath1001_tx_norm_2016-04-21-uq_vsd_blind_list.RData")
+
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"acc_variable_genes_2016-04-21")
+prefix.string = file.path(this_analysis_path,"graphics","acc_variable_genes_2016-04-21-")
+rdata_prefix = file.path(this_analysis_path,'acc_variable_genes_2016-04-21-')
+step_list = "load_lrt"
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/acc_variable_genes_2016-02-29-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome highly variable genes by DESeq2}
+\date{April 21, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Using count matrix and associated files \\ \verb|\Sexpr{counts_mat_file}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+Try to call DE using RUVg with $k=2,3,4,5$ and compare number of DEG.
+
+<<load_ruvg>>=
+load(ruvg_rdata_file) # loaded RUVg_21ref_uq,uqMat
+counts_mat0 = read.table(counts_mat_file,sep=',',header=TRUE,row.names=1)
+countsMat = as.matrix(counts_mat0)
+
+# hypo- and hyper-methylated accessions from Rosa's first growth batch (see Joe's email April 28, 2016 8:21am; April 27, 2016 12:51pm)
+hypo = avgm[Tissue=='Leaf' & Sequenced_By=='SALK' & CMT2_mCHH<0.1 & RdDM_mCHH<0.1,tg_ecotypeidx]
+
+rbatch1_hypo = salk_mc_rosa_batch1[,list(tg_ecotypeidx=tg_ecotypeidx,
+                                         hypo=tg_ecotypeidx %in% hypo)]
+
+rbatch1_hyper = avgm[Tissue=='Leaf' & Sequenced_By=='SALK' & CMT2_mCHH>0.15 & RdDM_mCHH>0.3 & tg_ecotypeidx %in% salk_mc_rosa_batch1[,tg_ecotypeidx],tg_ecotypeidx]
+
+acc_tx_1001g = intersect(colnames(countsMat),acc_list_1001g[,tg_ecotypeidx])
+design_1001g = data.frame(
+    tg_ecotypeidx=with(acc_list_1001g,{
+        tg_ecotypeidx[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    tg_ecotypeid=with(acc_list_1001g,{
+        tg_ecotypeid[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    group=with(acc_list_1001g,{# admixture groups
+        group[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    relict=with(acc_list_1001g,{ # relict is "Y" or "" based on info from 1001G paper
+        relict[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    hypo1=with(rbatch1_hypo,{# hypo-methylated vs not in Rosa's growth batch 1
+        hypo[match(acc_tx_1001g,tg_ecotypeidx)]
+    })
+)
+
+design_1001g = within(design_1001g,{
+    # groups from admixture: relict, admixed, or non-relict
+    group2 = factor(ifelse(group=='relict','relict',ifelse(group=='admixed','admixed','non-relict')))
+    # relict or non-relict based on 'Y' or '' from 1001G table
+    group3 = factor(ifelse(relict=='Y','relict','non-relict'))
+    hypo11 = factor(ifelse(hypo1==TRUE,1,0))
+})
+
+# subset to the common accessions with genome data
+countsMat = countsMat[,acc_tx_1001g]
+normalizedCounts = lapply(RUVg_21ref_uq,function(rg) {
+  rg$normalizedCounts[,acc_tx_1001g]
+  })
+W =  lapply(names(RUVg_21ref_uq),function(ri) {
+  rg = RUVg_21ref_uq[[ri]]
+  Wi = rg$W
+  rownames(Wi) = colnames(rg$normalizedCounts)
+  Wi = Wi[acc_tx_1001g,]
+  return(Wi)
+})
+names(W) = names(RUVg_21ref_uq)
+
+load(vsd_rdata_file) # loaded vsdL,ddsMatL
+vsd_mat = lapply(vsdL,function(v) {
+  vm = assay(v)
+  colnames(vm) = colData(v)$tg_ecotypeidx
+  vm = vm[,acc_tx_1001g]
+  return(vm)
+})
+vsd = lapply(vsdL,function(v) {
+  v = v[,match(acc_tx_1001g,v$tg_ecotypeidx)]
+  v$group = design_1001g[,'group']
+  v$relict = design_1001g[,'relict']
+  v$tg_ecotypeid = design_1001g[,'tg_ecotypeid']
+  return(v)
+})
+@ 
+
+<<sample_pca>>=
+rv = lapply(vsd_mat,function(vm) rowVars(vm))
+select = lapply(rv,function(rvi) {
+  order(rvi, decreasing = TRUE)[seq_len(min(500, length(rvi)))]
+})
+pca = lapply(names(vsd_mat),function(vname) {
+  vm = vsd_mat[[vname]]
+  si = select[[vname]]
+  prcomp(t(vm[si, ]))
+})
+names(pca) = names(vsd_mat)
+
+pca_x2 = lapply(pca,function(pcai) data.frame(pcai$x,acc_tx_1001g))
+#pca_g1 = data.frame(PC1_group=ifelse(pca$x[,'PC1']<=25,1,2),tg_ecotypeidx=acc_tx_1001g)
+#pca_g1 = merge(pca_g1,acc_list_1001g[,list(tg_ecotypeidx,longitude,latitude)])
+
+aload = lapply(pca,function(pcai) abs(pcai$rotation))
+aload_rel = lapply(aload,function(aloadi) sweep(aloadi, 2, colSums(aloadi), "/"))
+@ 
+
+<<sample_pca_gplot,fig.width=5,fig.height=3>>=
+vsd = lapply(vsd,function(vsdi) {
+  vsdi$plate_batch2 = salk_tx_platebatch[match(design_1001g[,'tg_ecotypeid'],tg_ecotypeid),plate_batch2]
+  return(vsdi)
+})
+pca_dat = lapply(vsd,function(vsdi) {
+  DESeq2::plotPCA(vsdi,intgroup="plate_batch2",returnData=TRUE)
+})
+pca_dat_df = ldply(pca_dat,function(di) {di},.id="k")
+percentVar = ldply(pca_dat,function(di) round(100*attr(di, "percentVar")),
+                   .id='k')
+p4a = ggplot(data=pca_dat_df,aes(PC1, PC2))
+p4b = p4a + geom_point(size=1.5,alpha=0.75,aes(colour=group)) + 
+  facet_wrap(~k) +
+   geom_text(data=percentVar,aes(x=-55,y=30,
+            label=sprintf("PC1 %d%% variance\nPC2 %d%% variance",V1,V2)),
+            hjust=0,vjust=0.5) 
+p4c = p4b + 
+  scale_color_brewer(palette='Set1') +
+  xlab("PC1") + ylab("PC2") +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+@
+
+<<sample_pca_gplot2,fig.width=5,fig.height=3>>=
+pca_dat = lapply(vsd,function(vsdi) {
+  DESeq2::plotPCA(vsdi,intgroup="group",returnData=TRUE)
+})
+pca_dat_df = ldply(pca_dat,function(di) {di},.id="k")
+percentVar = ldply(pca_dat,function(di) round(100*attr(di, "percentVar")),
+                   .id='k')
+
+p4a = ggplot(data=pca_dat_df,aes(PC1, PC2))
+p4b = p4a + geom_point(size=1.5,alpha=0.75,aes(colour=(group=='relict'))) + 
+  facet_wrap(~k) +
+   geom_text(data=percentVar,aes(x=-55,y=30,
+            label=sprintf("PC1 %d%% variance\nPC2 %d%% variance",V1,V2)),
+            hjust=0,vjust=0.5) 
+p4c = p4b + 
+  scale_color_brewer("Relict",palette='Set1') +
+  xlab("PC1") + ylab("PC2") +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+@
+
+<<sample_pca_gplot3,fig.width=5,fig.height=3>>=
+pca_dat = lapply(vsd,function(vsdi) {
+  di = DESeq2::plotPCA(vsdi,intgroup="group",returnData=TRUE)
+  di$long = acc_list_1001g[match(colData(vsdi)[,'tg_ecotypeidx'],tg_ecotypeidx),longitude]
+  di$lat = acc_list_1001g[match(colData(vsdi)[,'tg_ecotypeidx'],tg_ecotypeidx),latitude]
+  return(di)
+})
+pca_dat_df = ldply(pca_dat,function(di) {di},.id="k")
+percentVar = ldply(pca_dat,function(di) round(100*attr(di, "percentVar")),
+                   .id='k')
+
+p4a = ggplot(data=pca_dat_df,aes(PC1,long)) 
+p4b = p4a + geom_point(size=1.5,aes(color=factor(group))) +
+  facet_wrap(~k) 
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+
+p4a = ggplot(data=pca_dat_df,aes(PC1,lat)) 
+p4b = p4a + geom_point(size=1.5,aes(color=factor(group))) +
+  facet_wrap(~k) 
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+
+p4a = ggplot(data=pca_dat_df,aes(PC2,long)) 
+p4b = p4a + geom_point(size=1.5,aes(color=factor(group))) +
+  facet_wrap(~k) 
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+
+p4a = ggplot(data=pca_dat_df,aes(PC2,lat)) 
+p4b = p4a + geom_point(size=1.5,aes(color=factor(group))) +
+  facet_wrap(~k) 
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+@
+
+<<sample_dist_mat,eval>>=
+sampleDists = lapply(vsd_mat,function(vm) dist(t(vm)))
+sampleDistMat = lapply(sampleDists,function(sdist) as.matrix(sdist))
+@
+
+<<sample_dist_hm,fig.width=5,fig.height=3>>=
+for (k in names(sampleDistMat)) {  
+  aheatmap(sampleDistMat[[k]],color="-Blues:255",
+           distfun=sampleDists[[k]],
+           annRow=data.frame(Group=as.character(colData(vsd[[k]])[,'group']),
+                             relict=colData(vsd[[k]])[,'group']=='relict',
+                             admixed=colData(vsd[[k]])[,'group']=='admixed'),
+           main=paste0('k=',k))
+}
+@ 
+
+<<sample_mds_plot,fig.cap="Facet by RUVg k">>=
+mds = ldply(names(sampleDistMat),function(k) cbind(data.frame(k=k,cmdscale(sampleDistMat[[k]])),data.frame(colData(vsd[[k]]))))
+
+p1a = ggplot(data=mds,aes(x=X1,y=X2,color=group))
+p1b = p1a + geom_point() + facet_wrap(~k)
+p1c = p1b + xlab("Dimension 1") +
+  ylab("Dimension 2") +
+  theme_bw()
+print(p1c)
+#qplot(X1,X2,color=continent,data=mds)
+@
+
+<<top_var_5perc_hm>>=
+topVarGenes = mapply(function(rvi,vsdi) {
+  print(floor(nrow(vsdi)*0.05))
+  rownames(vsdi)[head(order(-rvi),floor(nrow(vsdi)*0.05))]
+},rv,vsd_mat,SIMPLIFY=FALSE)
+names(topVarGenes) = paste0("var5p.",names(topVarGenes))
+       
+#mat = vsd_mat[ topVarGenes, ]
+#mat = mat - rowMeans(mat)
+topVarGenes1p = mapply(function(rvi,vsdi) {
+  rownames(vsdi)[head(order(-rvi),floor(nrow(vsdi)*0.01))]
+},rv,vsd_mat,SIMPLIFY=FALSE)
+names(topVarGenes1p) = paste0("var1p.",names(topVarGenes1p))
+topVarGenes10p = mapply(function(rvi,vsdi) {
+  print(floor(nrow(vsdi)*0.10))
+  rownames(vsdi)[head(order(-rvi),floor(nrow(vsdi)*0.10))]
+},rv,vsd_mat,SIMPLIFY=FALSE)
+names(topVarGenes10p) = paste0("var10p.",names(topVarGenes10p))
+@
+
+<<DE,cache=FALSE>>=
+design_list = list(allgroups=within(design_1001g,{ cmp=group }),# all admixture groups
+                   allgroups2=within(subset(design_1001g,group!='admixed'),{ cmp=group }),# all admixture groups excluding admixed
+                   rvnr=within(design_1001g, { cmp=group3 }), # relict vs non-relict
+                   hypo1=within(subset(design_1001g,!is.na(hypo11)), { cmp=hypo11 })
+                   )
+    
+if ("load_lrt" %in% step_list) {
+    load(paste0(rdata_prefix,'lrt_list.RData'))
+} else {
+
+    lrt_list1 = llply(design_list[1:2],function(des) {    
+        acc_curr = as.character(des[,'tg_ecotypeidx'])
+        cmp = droplevels(des[,'cmp'])
+        print(cmp)
+        target_coef = ifelse(rep(nlevels(cmp)==2,times=nlevels(cmp)-1),2,2:nlevels(cmp))
+        print(target_coef)
+        llply(W,function(Wk) {
+          y = DGEList(counts=countsMat[,acc_curr],group=cmp)
+          W_curr = Wk[acc_curr,]
+          desFull = model.matrix(~cmp + W_curr)
+          y = calcNormFactors(y,method="upperquartile")
+          y = estimateGLMCommonDisp(y,desFull,verbose=TRUE)
+          y = estimateGLMTagwiseDisp(y,desFull)
+          fit = glmFit(y,desFull)
+          lrt = glmLRT(fit, coef=target_coef)
+        })
+    },.parallel=TRUE)
+    
+    lrt_list2 = llply(design_list[3:4],function(des) {    
+        acc_curr = as.character(des[,'tg_ecotypeidx'])
+        cmp = droplevels(des[,'cmp'])
+        print(cmp)
+        target_coef = ifelse(rep(nlevels(cmp)==2,times=nlevels(cmp)-1),2,2:nlevels(cmp))
+        print(target_coef)
+        llply(W,function(Wk) {
+          y = DGEList(counts=countsMat[,acc_curr],group=cmp)
+          W_curr = Wk[acc_curr,]
+          desFull = model.matrix(~cmp + W_curr)
+          y = calcNormFactors(y,method="upperquartile")
+          y = estimateGLMCommonDisp(y,desFull,verbose=TRUE)
+          y = estimateGLMTagwiseDisp(y,desFull)
+          fit = glmFit(y,desFull)
+          lrt = glmLRT(fit, coef=target_coef)
+        })
+    },.parallel=TRUE)
+
+    lrt_list = c(lrt_list1,lrt_list2)
+    
+    save(lrt_list,file=paste0(rdata_prefix,'lrt_list.RData'))
+}
+
+topTable_list = llply(lrt_list,function(lrt) {
+    llply(lrt,function(lrt_k) {
+      topTags(lrt_k,n=Inf,p.value=1)$table
+    })
+})
+
+if ('save_results' %in% step_list) {
+    
+    for (cmp in names(topTable_list)) {
+        for (k in names(topTable_list[[cmp]])) {
+            write.table(topTable_list[[cmp]][[k]],
+                        file=sprintf('%stopTable_%s_k%s.tsv',rdata_prefix,cmp,k),
+                        quote=FALSE,sep='\t',col.names=TRUE,row.names=TRUE)
+            write.table(subset(topTable_list[[cmp]][[k]],FDR<=0.05),
+                        file=sprintf('%stopTable_%s_k%s_fdr5.tsv',rdata_prefix,cmp,k),
+                        quote=FALSE,sep='\t',col.names=TRUE,row.names=TRUE)
+
+        }
+    }
+    
+}
+
+@
+
+<<topDEGenes_list>>=
+topDEGenes_list0 = lapply(topTable_list,function(tt) {
+    mapply(function(tt_k,tg_k) {
+      list(top1=rownames(tt_k[1:length(tg_k),]),top2=rownames(subset(tt_k,FDR<=0.05)))
+    },tt,topVarGenes,SIMPLIFY=FALSE)
+})
+
+topDEGenes_list0 = unlist(unlist(topDEGenes_list0,recursive=FALSE),recursive=FALSE)
+topDEGenes_list = topDEGenes_list0[lapply(topDEGenes_list0,length)<=5000]
+@
+
+<<num_deg,fig.width=1.6,fig.height=1.9>>=
+deg_count = ldply(topTable_list,function(tt) {
+  ldply(tt,function(tt_k) {
+    nrow(subset(tt_k,PValue<=0.05))
+  },.id="k")
+},.id="name.exp")
+
+p8a = ggplot(subset(deg_count),
+             aes(x=k,y=V1,group=name.exp,color=name.exp))
+p8b = p8a + geom_line() + geom_point(size=0.7)
+p8c = p8b + scale_x_discrete("RUVg k=") +
+  scale_y_continuous("Number of diff. exp. genes",limits=c(0,9500)) +
+  scale_color_discrete("",limits=c('rvnr','avr','avnr'),
+                             labels=c("Relict vs\nNon-relict",
+                                      "Admixed vs\nRelict",
+                                      "Admixed vs\nNon-relict")) +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+          axis.text.x=element_text(size=5),
+          axis.title.y=element_text(size=6),
+          axis.text.y=element_text(size=5),
+          legend.text=element_text(size=5),
+          legend.title=element_text(size=6),
+          legend.key.size=unit(0.8,"line"),
+          legend.position="top") +
+  guides(colour=guide_legend(ncol=2))
+
+#pdf(paste0(prefix.string,"num_deg.pdf"),width=1.6,height=1.9)
+print(p8c)
+#dev.off()
+@ 
+
+<<num_deg_k4,fig.width=1.4,fig.height=1.1>>=
+p8a = ggplot(subset(deg_count,k==4),aes(x=name.exp,y=V1)) 
+p8b = p8a + geom_bar(stat="identity",width=0.6) + geom_text(aes(y=V1+50,label=V1),size=1.5,hjust=0) +
+    coord_flip()
+p8c = p8b + scale_x_discrete("",limits=c('allgroups','allgroups2','rvnr','hypo1'),
+                             labels=c("All groups",
+                                      "All groups\nexcluding admixed",
+                                      "Relict vs\nNon-relict",
+                                      "Hypomethylatedvs\nnon-hypomethylated")) +
+    scale_y_continuous("Number of diff. exp. genes") +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+          axis.text.x=element_text(size=5,angle=45,hjust=1),
+          axis.title.y=element_text(size=6),
+          axis.text.y=element_text(size=5))
+#pdf(paste0(prefix.string,"num_deg_k4.pdf"),width=1.4,height=1.1)
+print(p8c)
+#dev.off()
+@ 
+
+<<venn_deg_k4>>=
+deg_k4_list = llply(topTable_list,function(tt) {
+    tt_k = tt[['4']]
+    rownames(subset(tt_k,FDR<=0.05))
+})
+
+pdf(paste0(prefix.string,'venn_deg_k4.pdf'),width=3,height=3)
+venn = Venn(deg_k4_list[c('allgroups2','rvnr')])
+plot(venn,doWeights=TRUE)
+dev.off()
+@ 
+
+<<venn_deg_k4_hypo>>=
+pdf(paste0(prefix.string,'venn_deg_k4_hypo.pdf'),width=4,height=4)
+venn = Venn(deg_k4_list[c('allgroups2','rvnr','hypo1')])
+plot(venn,doWeights=TRUE)
+dev.off()
+@ 
+
+
+\section{gProfiler runs for Gene Ontology enrichment}
+
+<<eqtl_genes>>=
+qtl_master_list = data.frame(
+  eqtl_name=c("eqtl_16_1e-9.4","eqtl_19_1e-9.4"),
+  eqtl_path=c(eqtl_16_path,eqtl_19_path),
+  thr=c("1e-9","1e-9")
+  )
+
+topQTLGenes_list = alply(qtl_master_list,1,function(einfo) {
+    qtl_table = fread(file.path(einfo[1,'eqtl_path'],'results/lmm_master',paste0('chr1-5genes_',einfo[1,'thr'],'.bed')))
+    unique(qtl_table[,V4])
+})
+names(topQTLGenes_list) = qtl_master_list[,'eqtl_name']
+@ 
+
+<<run_gprofiler,echo=FALSE,cache=FALSE>>=
+run_gprofiler<-function(gene_list,gene_list_name,gp_params,run_gp=TRUE) {
+  gp_output = adply(gp_params,1,function(p) {
+      output_prefix = paste0(prefix.string,gene_list_name,'_max',p[1,'max_set_size'],'_f',p[1,'hier_filtering'])
+      if (run_gp) {
+        gprofiler(gene_list,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'],
+                  png_fn=paste0(output_prefix,'.png'))
+        gp_result = gprofiler(gene_list,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'])
+        write.table(gp_result,paste0(output_prefix,'.txt'),sep="\t",row.names=F,col.names=T,quote=F)
+    }
+        data.frame(output_prefix)
+    },.parallel=T)
+ return(gp_output) 
+}
+max_user_p = 0.5
+run_gprofiler_all<-function(gene_list,gene_list_name,gp_params,run_gp=TRUE) {
+  gp_output = adply(gp_params,1,function(p) {
+      output_prefix = paste0(prefix.string,gene_list_name,'_max',p[1,'max_set_size'],'_f',p[1,'hier_filtering'],'_all')
+      print(output_prefix)
+      if (run_gp) {
+        gp_result = ldply(gene_list,function(gl) {
+          print(length(gl))
+          gprofiler(gl,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'],significant=F,max_p_value=max_user_p)
+        },.parallel=T)
+        write.table(gp_result,paste0(output_prefix,'.txt'),sep="\t",row.names=F,col.names=T,quote=F)
+    }
+        data.frame(output_prefix)
+    })
+ return(gp_output) 
+}
+@
+
+<<plot_gp_hm,echo=FALSE,cache=FALSE>>=
+plot_gp_hm<-function(group_gp_plot,motif_select_dt,orderCol,hm_file,hm_width,hm_height,Rowv=TRUE,...) {
+    
+  group_gp_plot0 = stats::reshape(group_gp_plot[,c('.id','term.name','p.value')],
+                           idvar='term.name',timevar='.id',v.names='p.value',
+                           direction='wide')
+  rownames(group_gp_plot0) = group_gp_plot0[,'term.name']
+  group_gp_plot0[,'term.name'] = NULL
+  colnames(group_gp_plot0) = gsub('p.value.','',colnames(group_gp_plot0))
+  group_gp_plot0 = NAToUnknown(group_gp_plot0,unknown=max_user_p,force=T)
+  colnames(group_gp_plot0) = sapply(colnames(group_gp_plot0),function(qn) {
+    motif_select_dt[name.exp==qn,][1,name.display]
+  })
+  if (!is.na(orderCol)) {
+      group_gp_plot0 = group_gp_plot0[,orderCol[orderCol %in% colnames(group_gp_plot0)]]
+  }
+  print(colnames(group_gp_plot0))
+  
+  postscript(file=hm_file,onefile=FALSE, width=hm_width,height=hm_height,horizontal=FALSE)
+  aheatmap(-log10(as.matrix(group_gp_plot0)),color="YlOrRd:20",scale="none",
+           Rowv=Rowv,revC=TRUE,
+           verbose=F,...)
+  dev.off()
+}
+@
+
+<<<plot_gp_hm7,echo=FALSE,cache=FALSE,cache=FALSE>>=
+# allows customized colors and breaks
+plot_gp_hm7<-function(group_gp_plot,motif_select_dt,orderCol,color,breaks,hm_file,hm_width,hm_height,...) {
+
+    group_gp_plot0 = stats::reshape(group_gp_plot[,c('.id','term.name','p.value')],
+                                    idvar='term.name',timevar='.id',v.names='p.value',
+                                    direction='wide')
+    rownames(group_gp_plot0) = group_gp_plot0[,'term.name']
+    group_gp_plot0[,'term.name'] = NULL
+    colnames(group_gp_plot0) = gsub('p.value.','',colnames(group_gp_plot0))
+    group_gp_plot0 = NAToUnknown(group_gp_plot0,unknown=max_user_p,force=T)
+    colnames(group_gp_plot0) = sapply(colnames(group_gp_plot0),function(qn) {
+        motif_select_dt[name.exp==qn,][1,name.display]
+    })
+    if (!is.na(orderCol)) {
+        group_gp_plot0 = group_gp_plot0[,orderCol[orderCol %in% colnames(group_gp_plot0)]]
+    }
+    print(colnames(group_gp_plot0))
+    
+    postscript(file=hm_file,onefile=FALSE, width=hm_width,height=hm_height,horizontal=FALSE)
+    aheatmap(-log10(as.matrix(group_gp_plot0)),color=color,breaks=breaks,
+             Rowv=TRUE,revC=TRUE,
+             verbose=F,...)
+
+    dev.off()
+}
+@
+<<acc_gp_output,echo=FALSE,results="hide">>=
+<<gp_params,echo=FALSE>>=
+#gp_params = expand.grid(max_set_size=c(1000,1500,2000),
+#    hier_filtering=c('none','moderate','strong'))
+#gp_params = expand.grid(max_set_size=c(2000),
+#    hier_filtering=c('none'))
+run_acc_gp = "run_acc_gp" %in% step_list
+acc_gene_lists = c(topVarGenes,
+                   topVarGenes1p,
+                   topVarGenes10p,
+                   topDEGenes_list,
+                   topQTLGenes_list)
+
+gp_params = expand.grid(max_set_size=c(800,1000,1250,1500,2000),
+    hier_filtering=c('none'))
+#gp_params = expand.grid(max_set_size=c(2000),
+#    hier_filtering=c('none'))
+acc_gp_output_all = run_gprofiler_all(acc_gene_lists,'acc_var',gp_params,run_gp=run_acc_gp)
+@
+
+<<read_acc_gp,echo=FALSE>>=
+acc_gp = adply(acc_gp_output_all,1,function(gp) {
+  fread(paste0(gp[1,'output_prefix'],'.txt'),colClasses=c("significant"="character"))
+  },.parallel=T)
+acc_gp=ddply(acc_gp,c("max_set_size","hier_filtering",".id","domain"),
+               transform,p.value.rank=rank(p.value))
+#acc_gp[,'.id'] = gsub(' nS','',acc_gp[,'.id'])
+@
+
+<<plot_acc_gp_hm,echo=FALSE,results="hide",warning=FALSE>>=
+genelist_summary = data.table(
+  name.exp=c(paste0("var5p.",2:5),
+             paste0("var1p.",2:5),
+             paste0("var10p.",2:5),
+             paste0("allgroups.",2:5,".top1"),
+             paste0("allgroups.",2:5,".top2"),
+             paste0("allgroups2.",2:5,".top1"),
+             paste0("allgroups2.",2:5,".top2"),
+             paste0("rvnr.",2:5,".top1"),
+             paste0("rvnr.",2:5,".top2"),
+             paste0("hypo1.",2:5,".top1"),
+             paste0("hypo1.",2:5,".top2"),
+             "eqtl_16_1e-9.4","eqtl_19_1e-9.4"),
+  name.display=c(paste0('top 5% varied k',2:5),
+                 paste0('top 1% varied k',2:5),
+                 paste0('top 10% varied k',2:5),
+                 paste0('all groups top 5% DE k',2:5),
+                 paste0('all groups p<=0.05 DE k',2:5),
+                 paste0('all groups2 top 5% DE k',2:5),
+                 paste0('all groups2 p<=0.05 DE k',2:5),
+                 paste0('R vs NR top 5% DE k',2:5),
+                 paste0('R vs NR p<=0.05 DE k',2:5),
+                 paste0('Hypomethylated top 5% DE k',2:5),
+                 paste0('hypomethylated p<=0.05 DE k',2:5),
+                 "eqtl_16_1e-9.4","eqtl_19_1e-9.4"))
+
+acc_top20_terms = unique(subset(acc_gp,p.value.rank<=20 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top20 = merge(acc_top20_terms,acc_gp)
+acc_top15_terms = unique(subset(acc_gp,p.value.rank<=15 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top15 = merge(acc_top15_terms,acc_gp)
+acc_top10_terms = unique(subset(acc_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top10 = merge(acc_top10_terms,acc_gp)
+
+d_ply(acc_gp_top20,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top20_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4.8,
+             Colv=NA
+             )
+})
+
+d_ply(acc_gp_top15,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top15_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4.8,
+             Colv=NA
+             )
+})
+
+d_ply(acc_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4,
+             Colv=NA
+             )
+})
+@
+
+<<plot_acc_gp_hm_sub1,eval=FALSE>>=
+genelist_summary2 = genelist_summary[
+  name.exp %in% c("allgroups.3.top1","allgroups.3.top2",
+                  "avr.3.top1","avr.3.top2","avnr.3.top1","avnr.3.top2",
+                  "rvnr.3.top1","rvnr.3.top2"),]
+acc_top10_terms = unique(subset(acc_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary2[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top10 = merge(acc_top10_terms,acc_gp)
+
+d_ply(acc_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_sub1.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary2,
+             orderCol=genelist_summary2[,name.display],
+             eps_file,2.6,2.6,
+             Colv=NA,cexCol=0.4,treeheight=15
+             )
+})
+@
+
+<<plot_acc_gp_hm_sub2>>=
+genelist_summary3 = genelist_summary[
+  name.exp %in% c("var5p.4","allgroups.4.top1","allgroups.4.top2",
+                  "rvnr.4.top1","rvnr.4.top2"),]
+acc_top10_terms = unique(subset(acc_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary3[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top10 = merge(acc_top10_terms,acc_gp)
+                                     
+d_ply(acc_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_sub2.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary3,
+             orderCol=genelist_summary3[,name.display],
+             eps_file,2.2,2.6,
+             Colv=NA,cexCol=0.4,treeheight=15
+             )
+})
+@
+
+<<plot_acc_gp_hm_sub3>>=
+genelist_summary4 = genelist_summary[
+  name.exp %in% c("eqtl_16_1e-9.4","eqtl_19_1e-9.4")]
+acc_top10_terms = unique(subset(acc_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary4[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top10 = merge(acc_top10_terms,acc_gp)
+                                     
+d_ply(acc_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_sub3.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary4,
+             orderCol=genelist_summary4[,name.display],
+             eps_file,2.4,2.4,
+             Colv=NA,Rowv=NA
+             )
+})
+@
+
+<<plot_acc_gp_hm_sub4>>=
+genelist_summary5 = genelist_summary[
+  name.exp %in% c("var5p.4","allgroups2.4.top1","rvnr.4.top1"),]
+acc_top10_terms = unique(subset(acc_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary5[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top10 = merge(acc_top10_terms,acc_gp)
+ 
+d_ply(acc_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary5[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_sub4.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary5,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,1.9,3.4,
+                Colv=NA,treeheight=5,cellheight=5,cellwidth=5
+             )
+})
+@
+
+<<sessionInfo>>=    
+sessionInfo()
+@
+
+\end{document}
+
+
+
+<<meanSdPlot,eval=FALSE>>=
+par(mfrow=c(1,2))
+notAllZero = (rowSums(counts(ddsMat))>0)
+meanSdPlot(log2(counts(ddsMat)[notAllZero, ] + 1))
+meanSdPlot(vsd_mat[notAllZero, ])
+@ 
+
+<<pca_color_by_eid,fig.width=4,fig.height=2.5>>=
+p4a = ggplot(data=pca_x2,aes(x=PC1,y=PC2,color=as.numeric(tg_ecotypeid)))
+p4b = p4a + geom_point()
+p4c = p4b + theme_bw()
+print(p4c)
+@ 
+
+<<pca_group1_eu,echo=FALSE,results="hide">>=
+map_eu = get_map(location = 'Europe', zoom = 4,maptype="hybrid")
+p2a = ggmap(map_eu)
+p2b = p2a 
+p2c = p2b + geom_point(data=pca_g1,aes(x=longitude,y=latitude,color=factor(PC1_group)),
+                       alpha=0.8)
+p2d = p2c + scale_color_discrete("PC1 Group") +
+    theme_bw()                          
+print(p2d)
+@
+
+
+<<pca_group1_na,echo=FALSE,results="hide">>=
+map_na = get_map(location = 'North America', zoom = 3,maptype="hybrid")
+p3a = ggmap(map_na)
+p3b = p3a 
+p3c = p3b + geom_point(data=pca_g1,aes(x=longitude,y=latitude,color=factor(PC1_group)),
+                       alpha=0.8)
+p3d = p3c + scale_color_discrete("PC1 Group") +
+    xlab("longitude") + ylab("latitude") +
+    theme_bw()                          
+print(p3d)
+@
+
+<<corr_scatter,fig.width=8,fig.height=6,dev="png">>=
+read_pairs_dat<-function(dat_file,value_name) {
+    dat = read.table(dat_file,sep='\t',row.names=1,quote="")
+    dat = as.matrix(dat)
+    rownames(dat) = paste0("X",rownames(dat))
+    colnames(dat) = rownames(dat)
+    dat_long = melt(dat,value.name=value_name)
+    rownames(dat_long) = with(dat_long,paste(Var1,Var2,sep="_"))
+    return(list(dat=dat,dat_long=dat_long))
+}
+
+## expression correlations
+expr_dist = melt(sampleDistMat,value.name="expr")
+expr_pcc = cor(vsd_mat)
+rownames(expr_pcc) = colnames(expr_pcc) = colData(vsd)[,'tg_ecotypeidx']
+expr_pcc_long = melt(expr_pcc,value.name="expr_pcc")
+rownames(expr_pcc_long) = with(expr_pcc_long,paste(Var1,Var2,sep='_'))
+expr_spc = cor(vsd_mat,method="spearman")
+rownames(expr_spc) = colnames(expr_spc) = colData(vsd)[,'tg_ecotypeidx']
+expr_spc_long = melt(expr_spc,value.name="expr_spc")
+rownames(expr_spc_long) = with(expr_spc_long,paste(Var1,Var2,sep='_'))
+
+## genotype correlations
+kinship_maf1_csv = '/gale/netapp/home/shhuang/projects/1001_genomes/marginal_test_cov_01/kinship_maf1.csv'
+kinship_mac5_csv = '/gale/netapp/home/shhuang/data/1001_genomes/gmi_release_v3.1/SNP_matrix_imputed_hdf5/1001_SNP_MATRIX/kinship_ibs_mac5.csv'
+samplecov_maf1_csv = '/gale/netapp/home/shhuang/projects/1001_genomes/marginal_test_cov_01/samplecov_maf1.csv'
+
+ibd = read_pairs_dat(kinship_maf1_csv,'ibd')
+ibs = read_pairs_dat(kinship_mac5_csv,'ibs')
+#transk = read_pairs_dat(samplecov_maf1_csv,'transk')
+
+## methylome correlations
+dmr_pcc = load_dmr_pcc()
+dmr_pcc_long = llply(dmr_pcc,function(pcc) {
+    rownames(pcc) = paste0("X",rownames(pcc))
+    colnames(pcc) = paste0("X",colnames(pcc))
+    pcc_long = melt(pcc,value.name='pcc')
+    rownames(pcc_long) = with(pcc_long,paste(Var1,Var2,sep="_"))
+    return(pcc_long)
+})
+                     
+pair_names = intersect(rownames(expr_pcc_long),rownames(dmr_pcc_long[['cor_c_p']]))
+
+merge_dist = data.frame(expr_pcc_long[pair_names,],
+                        expr_spc=expr_spc_long[pair_names,'expr_spc'],
+                        ibd=ibd[['dat_long']][pair_names,'ibd'],
+                        ibs=ibs[['dat_long']][pair_names,'ibs'],
+                        c_pcc=dmr_pcc_long[['cor_c_p']][pair_names,'pcc'],
+                        cg_pcc=dmr_pcc_long[['cor_cg_p']][pair_names,'pcc'],
+                        ch_pcc=dmr_pcc_long[['cor_ch_p']][pair_names,'pcc'])
+
+#                        transk[['dat_long']][pair_names,'transk'])
+merge_dist = within(merge_dist,{
+    acc1_group = acc_list_1001g[match(Var1,tg_ecotypeidx),group]
+    acc2_group = acc_list_1001g[match(Var2,tg_ecotypeidx),group]
+})
+
+merge_dist = within(merge_dist,{
+    relict_count = ((acc1_group=='relict')+(acc2_group=='relict'))
+})
+
+
+par(mfrow=c(2,4))
+plot(c_pcc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(cg_pcc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(ch_pcc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~c_pcc,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~cg_pcc,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~ch_pcc,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+@ 
+
+<<expr_dist_within_group>>=
+p5a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group==acc2_group),
+             aes(x=expr_spc))
+p5b = p5a + geom_histogram() + facet_wrap(~acc1_group,scales="free_y")
+p5c = p5b + theme_bw()
+print(p5c)
+@ 
+
+<<expr_dist_btw_group>>=
+p6a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group),
+             aes(x=expr_spc))
+p6b = p6a + geom_histogram() + facet_wrap(~acc1_group,scales="free_y")
+p6c = p6b + theme_bw()
+print(p6c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2),
+             aes(x=ibs,y=expr_spc))
+p7b = p7a + stat_binhex(bins=100)
+p7c = p7b + theme_bw()
+print(p7c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group),
+             aes(x=ibs,y=expr_spc))
+p7b = p7a + stat_binhex(bins=100) + facet_wrap(~acc1_group)
+p7c = p7b + theme_bw()
+print(p7c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2),
+             aes(x=ibs,y=expr_spc))
+p7b = p7a + stat_binhex(bins=100) + facet_wrap(~relict_count)
+p7c = p7b + scale_colour_brewer(palette="Set1") +
+    theme_bw()
+print(p7c)
+@ 
+
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2),
+             aes(x=snp,y=expr,color=acc2_group))
+p7b = p7a + geom_point() + facet_wrap(~acc1_group)
+p7c = p7b + scale_colour_brewer(palette="Set3") +
+    theme_bw()
+print(p7c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group==acc2_group),
+             aes(x=acc1_group,y=expr))
+p7b = p7a + geom_boxplot()
+p7c = p7b + theme_bw()
+print(p7c)
+@ 

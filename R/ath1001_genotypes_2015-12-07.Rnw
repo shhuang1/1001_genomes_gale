@@ -1,0 +1,121 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(ballgown)
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(plyr)
+library(R.utils)
+library(S4Vectors)
+source("get_file_paths.R")
+@
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ath1001_genotypes_2015-12-07")
+prefix.string = file.path(this_analysis_path,"graphics","ath1001_genotypes_2015-12-07-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/ath1001_tx_ballgown_2015-12-07-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Create genotype object for 1001 genomes}
+\date{December 7, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Genome matrix data in \\ \verb|\Sexpr{gmi_rel_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<create_genotype_data>>=
+# read in ped                                                                                            
+
+genotype_by_chrom = file.path(gmi_rel_path,paste0('1001genomes_snp-short-indel_only_ACGTN_',1:5,'_filter1_recodeA'))
+
+famList = alply(genotype_by_chrom,1,function(i) {
+    fam = fread(paste0(i,'.fam'))
+    setnames(fam,c("FID","IID", "MID", "FID", "SEX","STATUS"))
+    fam
+},.parallel=TRUE)
+
+mapList = alply(genotype_by_chrom,1,function(i) {
+    map = fread(paste0(i,'.bim'),header=FALSE)
+    setnames(map,c("chr","name","cm","pos","minor","major"))
+    map
+},.parallel=TRUE)
+
+snpList = vector("list",length(genotype_by_chrom))
+
+for (i in seq(along=genotype_by_chrom)) {
+    print(i)
+    traw = fread(paste0(genotype_by_chrom[i],'.traw'))
+    map = mapList[[i]]
+    snpMat = as.matrix(traw[,-(1:6),with=FALSE])
+    colnames(snpMat) = as.character(famList[[i]][,IID])
+    rownames(snpMat) = map[,name]
+    snpList[[i]] = snpMat
+    map$inSampleMAF = rowMeans(snpMat,na.rm=TRUE)
+    gc()
+}
+
+L = sapply(snpList,nrow)
+Ind = cbind(c(0,cumsum(L)[-length(L)])+1, cumsum(L))
+snp = matrix(nr = sum(L), nc = ncol(snpList[[1]]))
+
+for(i in seq(along=snpList)) {
+    cat(".")
+    snp[Ind[i,1]:Ind[i,2],] = snpList[[i]]
+}
+
+map = do.call("rbind", mapList)
+map$chr = paste0("chr", map$chr)
+rownames(snp) = map[,name]
+colnames(snp) = famList[[1]][,IID]
+
+# how many snps?
+nrow(snp) #3,559,215
+
+save(map,snp,file=paste0(prefix.string,"ath1001_genotypeData_maf05.rda"))
+@
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

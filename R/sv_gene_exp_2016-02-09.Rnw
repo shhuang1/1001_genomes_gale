@@ -1,0 +1,112 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(gdata)
+library(ggplot2)
+library(GGally)
+library(NMF)
+library(plyr)
+library(scales)
+library(stringr)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"sv_gene_exp_2016-02-09")
+prefix.string = file.path(this_analysis_path,"graphics","sv_gene_exp_2016-02-09-")
+rdata_prefix = file.path(this_analysis_path,"sv_gene_exp_2016-02-09-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/ath1001_tx_stats_2016-02-09-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome stats from the rmake pipeline}
+\date{February 9, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<sv_closest,echo=FALSE,results="hide">>=
+sv_closest_files = list.files(file.path(sv_data_path,'GenomicFeatures'))
+
+sv_closest = rbindlist(alply(sv_closest_files,1,function(cl) {
+    dt = fread(file.path(sv_data_path,'GenomicFeatures',cl))
+    tg_ecotypeid = strsplit(cl,"_")[[1]][1]
+    cbind(tg_ecotypeid,dt)
+},.parallel=TRUE))
+
+sv_code = c('insertion'=1,'deletion'=-1)
+gene_ID0 = str_split_fixed(sv_closest[,V14],";",2)[,1]
+gene_ID = str_split_fixed(gene_ID0,"=",2)[,2]
+sv_closest = sv_closest[,`:=`(geneID=geneID,tg_ecotypeidx=paste0("X",tg_ecotypeid),
+                              sv_code=sv_code[V4])]
+
+sv_closest_genes = unique(sv_closest[,geneID])
+@ 
+
+<<gene_counts>>=
+expMat = fread(gNorm_normCounts_k4_file)
+
+common_genes = intersect(sv_closest_genes,expMat[,gene_id])
+
+sv_closest_wide = reshape(sv_closest[,list(tg_ecotypeidx,sv_code,geneID)],
+                          idvar="geneID",timevar="tg_ecotypeidx",v.names="sv_code",
+                          direction="wide")
+
+sv_closest_plot = sv_closest_wide[match(common_genes,geneID),2:9,with=FALSE]
+sv_closest_plot = NAToUnknown(sv_closest_plot,0)
+setnames(sv_closest_plot,gsub("sv_code.","",colnames(sv_closest_plot)))
+
+row_select  = rowSums(sv_closest_plot==1)>=1 & rowSums(sv_closest_plot==-1)>=1
+row_select = rep(TRUE,times=nrow(sv_closest))
+aheatmap(sv_closest_plot[row_select,],Colv=NA,Rowv=NA)
+
+exp_mat_plot = expMat[match(common_genes,gene_id),colnames(sv_closest_plot),with=FALSE]
+aheatmap(exp_mat_plot[row_select,],scale="row",Colv=NA,Rowv=NA)
+@ 
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

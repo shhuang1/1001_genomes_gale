@@ -1,0 +1,195 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(GGally)
+library(NMF)
+library(plyr)
+library(scales)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"rmake_stats_2016-02-09")
+prefix.string = file.path(this_analysis_path,"graphics","rmake_stats_2016-02-09-")
+rdata_prefix = file.path(this_analysis_path,"rmake_stats_2016-02-09-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/ath1001_tx_stats_2016-02-09-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome stats from the rmake pipeline}
+\date{February 9, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item rmake data in \\ \verb|\Sexpr{tfq_gale2_path}|.
+\item fq{\_}match version \\ \verb|\Sexpr{fq_match_version}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<mapped_dt,echo=FALSE,results="hide">>=
+sample_id_salk = get_samples_from_dir(data_dir=tfq_gale2_path,src='salk')
+
+mapped_dt = rbindlist(alply(sample_id_salk,1,function(ecotypeid) {
+    mapped_file = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.mapped'))
+  #print(mapped_file)
+  if (file.exists(mapped_file)) {
+    dt = fread(mapped_file)
+    return(cbind(tg_ecotypeid=ecotypeid,dt))
+  }
+},.parallel=T))
+
+if ("save_results" %in% step_list) {
+    write.table(mapped_dt,paste0(rdata_prefix,"bam_mapped.txt"),sep="\t",row.names=F,col.names=T,quote=F)
+}
+@
+
+<<mapped_ecdf,fig.width=4,fig.height=4>>=
+mapped_dt[,nSamples:=nrow(mapped_dt)]
+p3a = ggplot(data=mapped_dt,aes(x=MAPPED/1e6))
+p3b = p3a + geom_step(aes(nSamples=nSamples,y=(1-..y..) * nSamples),stat="ecdf") 
+p3c = p3b + scale_x_continuous("Minimum mapped reads (millions)",breaks=seq(0,130,by=10)) +
+  scale_y_continuous("Number of acccessions",breaks=seq(0,700,by=50)) +
+  theme_bw()
+print(p3c)
+@
+
+
+<<genebody_dt,echo=FALSE,results="hide">>=
+genebody_dt = rbindlist(alply(fq_match_salk,1,function(row) {
+  gb_file = file.path(tfq_oberon3_path,row[1,'tg_ecotypeid'],
+                  paste0(row[1,'tg_ecotypeid'],".bam.genebody"))
+  if (file.exists(gb_file)) {
+    dt = fread(file.path(tfq_oberon3_path,row[1,'tg_ecotypeid'],
+                    paste0(row[1,'tg_ecotypeid'],".bam.genebody")))
+    return(cbind(tg_ecotypeid=row[1,'tg_ecotypeid'],dt))
+  }
+},.parallel=T))
+genebody_dt[,FRAC_READ:=COUNT/sum(COUNT),by=tg_ecotypeid]
+@
+
+<<genebody_frac_hm,echo=FALSE>>=
+genebody_frac_wide = reshape(genebody_dt[,list(tg_ecotypeid,PERCENTILE,FRAC_READ)],
+                             idvar=c("tg_ecotypeid"),
+                             timevar=c("PERCENTILE"),
+                             direction="wide")
+rownames(genebody_frac_wide) = genebody_frac_wide[,tg_ecotypeid]
+genebody_frac_wide[,tg_ecotypeid:=NULL]
+genebody_frac_wide = genebody_frac_wide[,paste0('FRAC_READ.',1:100),with=FALSE]
+genebody_frac_wide = genebody_frac_wide[rowSums(is.na(genebody_frac_wide))==0,]
+aheatmap(genebody_frac_wide*100,col="Reds:100", Colv=NA)
+@
+
+<<gc_dt,echo=FALSE,results="hide">>=
+gc_dt = rbindlist(alply(fq_match_salk,1,function(row) {
+  gc_file = file.path(tfq_oberon3_path,row[1,'tg_ecotypeid'],
+                  paste0(row[1,'tg_ecotypeid'],".bam.gc"))
+  if (file.exists(gc_file)) {
+    dt = fread(gc_file)
+    return(cbind(tg_ecotypeid=row[1,'tg_ecotypeid'],dt))
+  }
+},.parallel=T))
+
+gc_dt[,FRAC_READ:=COUNT/sum(COUNT),by=tg_ecotypeid]
+@
+
+<<gc_frac_hm,echo=FALSE>>=
+gc_frac_wide = reshape(gc_dt[,list(tg_ecotypeid,GC,FRAC_READ)],
+                             idvar=c("tg_ecotypeid"),
+                             timevar=c("GC"),
+                             direction="wide")
+rownames(gc_frac_wide) = gc_frac_wide[,tg_ecotypeid]
+gc_frac_wide[,tg_ecotypeid:=NULL]
+gc_frac_wide = gc_frac_wide[,paste0('FRAC_READ.',0:100),with=FALSE]
+gc_frac_wide = gc_frac_wide[rowSums(is.na(gc_frac_wide))==0,]
+aheatmap(gc_frac_wide*100,col="Reds:100", Colv=NA)
+@
+
+<<biotype_dt,echo=FALSE,results="hide">>=
+biotype_dt = rbindlist(alply(fq_match_salk,1,function(row) {
+  biotype_file = file.path(tfq_oberon3_path,row[1,'tg_ecotypeid'],
+                  paste0(row[1,'tg_ecotypeid'],".bam.biotype"))
+  print(biotype_file)
+  if (file.exists(biotype_file)) {
+    dt = fread(biotype_file)
+    return(cbind(tg_ecotypeid=row[1,'tg_ecotypeid'],dt))
+  }
+},.parallel=F))
+
+biotype_dt[,FRAC_READ:=COUNT/sum(COUNT),by=tg_ecotypeid]
+@
+
+<<biotype_frac_hm,echo=FALSE>>=
+biotype_frac_wide = reshape(biotype_dt[,list(tg_ecotypeid,BIOTYPE,FRAC_READ)],
+                             idvar=c("tg_ecotypeid"),
+                             timevar=c("BIOTYPE"),
+                             direction="wide")
+rownames(biotype_frac_wide) = biotype_frac_wide[,tg_ecotypeid]
+biotype_frac_wide[,tg_ecotypeid:=NULL]
+biotype_frac_wide = biotype_frac_wide[,2:ncol(biotype_frac_wide),with=FALSE]
+biotype_frac_wide = biotype_frac_wide[rowSums(is.na(biotype_frac_wide))==0,]
+aheatmap(biotype_frac_wide[,!c("FRAC_READ.protein_coding","FRAC_READ.rRNA"),
+                           with=FALSE]*100,col="Reds:100", Colv=NA)
+@
+
+<<biotype_frac_hist,echo=FALSE>>=
+p1a = ggplot(biotype_dt,aes(x=FRAC_READ))
+p1b = p1a + geom_histogram() + facet_wrap(~BIOTYPE,scales="free")
+p1c = p1b + scale_y_continuous("Number of accessions") +
+  scale_x_continuous("Percent reads",labels=percent) +
+  theme_bw()
+print(p1c)
+@
+
+<<biotype_frac_bar,echo=FALSE>>=
+p2a = ggplot(biotype_dt[BIOTYPE!='protein_coding'],aes(y=FRAC_READ,x=factor(tg_ecotypeid),fill=BIOTYPE))
+p2b = p2a + geom_bar(stat="identity") + coord_flip()
+p2c = p2b + scale_y_continuous("Percent reads",labels=percent) +
+  theme_bw()
+print(p2c)
+@
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

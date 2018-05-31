@@ -1,0 +1,436 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(ballgown)
+library(corrplot)
+library(data.table)
+library(doMC)
+library(EDASeq)
+library(edgeR)
+library(ggplot2)
+library(plyr)
+library(RColorBrewer)
+library(RSkittleBrewer)
+library(R.utils)
+library(RUVSeq)
+library(S4Vectors)
+library(sva)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+ath1001_bg_all = file.path(PROJ_RESULTS_PATH,'ath1001_tx_ballgown_2015-12-05','graphics','ath1001_tx_ballgown_2015-12-05-all.rda')
+ath1001_htseq_all = file.path(PROJ_RESULTS_PATH,'ath1001_tx_htseq_count_2015-12-07','graphics','ath1001_tx_htseq_count_2015-12-07-count.txt')
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2015-12-08")
+prefix.string = file.path(this_analysis_path,"graphics","ath1001_tx_norm_2015-12-08-")
+step_list = ""
+trop = RSkittleBrewer('tropical')
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/ath1001_tx_norm_2015-12-08-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Create ballgown object for 1001 transcriptomes}
+\date{December 5, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item stringtie results in in \\ \verb|\Sexpr{stringtie_01_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<load_counts>>=
+hts_count = as.matrix(read.table(ath1001_htseq_all,sep='\t',header=TRUE,row.names=1))
+ss = function(x, pattern, slot=1,...) sapply(strsplit(x,pattern,...), "[", slot)
+
+## phenotype data
+pd = pd_1001g
+pd$sample_id = as.character(pd$tg_ecotypeid)
+
+## extract transcript data
+tName = rownames(hts_count)
+#gownTransFPKM =  texpr(bg, "FPKM")
+#colnames(gownTransFPKM) = ss(colnames(gownTransFPKM),"\\.",2)
+#gownTransFPKM = gownTransFPKM[,pd$dirname] # put in same order post-drop
+#gownTransMap = structure(bg)$trans
+#rownames(gownTransFPKM) = names(gownTransMap) = tName
+
+### mean filter: only keep transcripts with FPKM>0.1
+#mmTrans = rowMeans(gownTransFPKM) 
+#keepIndex=which(mmTrans > 0.1)
+#gownTransMap2 = gownTransMap[keepIndex]
+#validQuantileSamp = apply(gownTransFPKM[keepIndex,],2,function(x) quantile(x,p=0.75))>0
+#gownTransFPKM2 = gownTransFPKM[keepIndex,validQuantileSamp]
+#pd2 = pd[validQuantileSamp,]
+
+ath_19acc_21ref = fread(ath_19acc_21ref_file)
+@
+
+Take different min count thresholds, plot histogram of number of genes expressed in each number of accessions.  The histogram seems to be quite stable across thresholds from 1 to 5 counts, with bulk of accessions having around 20,000 expressed genes.
+<<acc_ngenes>>=
+try_min_count = 1:10
+
+ngenes_by_acc = rbindlist(alply(try_min_count,1,function(co) {
+  data.table(min_count=co,tg_ecotypeidx=colnames(hts_count),ngenes=colSums(hts_count>=co))
+}))
+p1a = ggplot(ngenes_by_acc,aes(x=ngenes))
+p1b = p1a + geom_histogram() +
+  facet_wrap(~min_count,scale="free_x") 
+p1c = p1b + xlab("Number of expressed genes") +
+  ylab("Number of accessions") + theme_bw()
+print(p1c)
+@
+
+Take different min count thresholds, plot histogram of the number of expressed genes for the number of accessions.  All show bimodal distribution, with ~15,000 genes expressed in >600 accessions and and a few thousand genes expressed in less than 200 accessions. A 5\% accession cutoff (red vertical line) seems to take out most of the unexpressed genes. Decided to take a count threshold of 5 and min number of accessions to be 5\% of total number of accessions
+<<genes_nacc>>=
+try_min_count = 1:10
+
+genes_by_nacc = rbindlist(alply(try_min_count,1,function(co) {
+  data.table(min_count=co,gene=rownames(hts_count),
+             nacc=rowSums(hts_count>=co),
+             nacc_total=ncol(hts_count))
+}))
+p2a = ggplot(genes_by_nacc,aes(x=nacc))
+p2b = p2a + geom_histogram() + geom_vline(aes(xintercept=0.05*nacc_total,col="red")) +
+  facet_wrap(~min_count,scale="free_x") 
+p2c = p2b + xlab("Number of accessions") +
+  ylab("Number of expressed genes") + theme_bw()
+print(p2c)
+@
+
+
+<<min_filter>>=
+min_count = 5
+min_sample = ncol(hts_count)*0.05
+### min filter: only keep genes expressed in at least 5% samples
+filter = apply(hts_count, 1, function(x) length(x[x>=min_count])>min_sample)
+
+validQuartileSamp = apply(hts_count[filter,],2,function(x) quantile(x,p=0.75))>0
+validGenomeSamp = colnames(hts_count) %in% make.names(pd$sample_id)
+hts_count2 = hts_count[filter,validQuartileSamp & validGenomeSamp]
+
+pd2 = pd[match(colnames(hts_count2),make.names(pd[,sample_id])),]
+pd2[,c("plate_batch1","plate_batch2","plate_batch3","plate_batch4"):=(salk_tx_platebatch[match(pd2[,tg_ecotypeid],salk_tx_platebatch[,tg_ecotypeid]),list(plate_batch1,plate_batch2,plate_batch3,plate_batch4)])]
+
+# normalizations
+mod1 = model.matrix(~pd2$group)
+mod0 = cbind(mod1[,1])
+
+## Estimate batch with svaseq (unsupervised)
+unsup_sva = svaseq(hts_count2,mod1,mod0,n.sv=1)
+batch_unsup_sva = unsup_sva$sv
+
+## Estimate batch with pca
+y = log2(hts_count2 + 1)
+
+batch_pca = svd(y - rowMeans(y))$v[,1]
+
+## Estimate batch with ruv (residuals)
+## this procedure follows the RUVSeq vignette
+## http://www.bioconductor.org/packages/devel/bioc/vignettes/RUVSeq/inst/doc/RUVSeq.pdf
+x <- as.factor(pd2$group)
+design <- model.matrix(~x)
+y <- DGEList(counts=hts_count2, group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+fit <- glmFit(y, design)
+res <- residuals(fit, type="deviance")
+seqUQ <- betweenLaneNormalization(hts_count2, which="upper")
+controls = rep(TRUE,dim(hts_count2)[1])
+batch_ruv_res = RUVr(seqUQ,controls,k=1,res)$W
+
+## Estimate batch with ruv empirical controls
+## this procedure follows the RUVSeq vignette
+## http://www.bioconductor.org/packages/devel/bioc/vignettes/RUVSeq/inst/doc/RUVSeq.pdf
+y <- DGEList(counts=hts_count2, group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+fit <- glmFit(y, design)
+lrt <- glmLRT(fit, coef=2)
+controls = rank(lrt$table$LR) <= 400
+batch_ruv_emp <- RUVg(hts_count2, controls, k=1)$W
+@ 
+
+<<plot_batch>>=
+plot(batch_unsup_sva,pch=19,col=trop[1],main="unsupervised sva")
+@ 
+
+<<corbatch>>=
+batchEstimates = cbind(x,batch_unsup_sva,
+                       batch_pca,batch_ruv_res,batch_ruv_emp)
+colnames(batchEstimates) = c("group","usva_sv1","pca","ruvres_w1","ruvemp_w1")
+corr = abs(cor(batchEstimates))
+cols = colorRampPalette(c(trop[2],"white",trop[1]))
+par(mar=c(5,5,5,5))
+corrplot(corr,method="ellipse",type="lower",col=cols(100),tl.pos="d")
+@
+
+<<uq>>=
+uq = betweenLaneNormalization(hts_count2,which="upper")
+
+col = c("black",brewer.pal(12,"Paired"))
+col_batch_a = list('b1'=rev(brewer.pal(9,"Reds")),
+                   'b2'=rev(brewer.pal(9,"Blues")),
+                   'b3'=rev(brewer.pal(9,"Greens"))
+)
+pch_batch_a = list('b1'=21,
+                   'b2'=22,
+                   'b3'=23)
+grp_a = brewer.pal(10,"Set3")
+names(grp_a) = unique(pd2[,group])
+pd2_include = pd2[,!is.na(plate_batch2)]
+par_batch = adply(pd2[pd2_include,],1,function(df) {
+  data.table(col01=col_batch_a[[df[1,plate_batch2]]][df[1,plate_batch4]],
+             pch01=pch_batch_a[[df[1,plate_batch2]]],
+             grp01=grp_a[df[1,group]])
+})
+
+sub1 = 0:100
+plotRLE(uq[,pd2_include][,sub1],
+        col=par_batch[sub1,col01],outline=FALSE, 
+        las=3, ylab="Relative Log Expression", cex.axis=1, cex.lab=1)
+
+sub1 = 1:497
+plotPCA(uq[,pd2_include][,sub1],
+        pch=par_batch[sub1,pch01],
+        bg=par_batch[sub1,col01], labels=FALSE,
+        cex=1, cex.axis=1, cex.lab=1)
+
+plotPCA(uq[,pd2_include][,sub1],
+        pch=par_batch[sub1,pch01],
+        bg=par_batch[sub1,grp01], labels=FALSE,
+        cex=1, cex.axis=1, cex.lab=1)
+@
+
+
+<<RUVs_all>>=
+max_nrep = max(laply(salk_tx_replist,length))
+rep_grps = do.call("rbind",llply(salk_tx_replist,function(tg_ecotypeid0) {
+  grp_row = rep(-1,max_nrep)
+  tg_ecotypeid = intersect(paste0("X",tg_ecotypeid0),colnames(uq))
+  grp_row[1:length(tg_ecotypeid)] = match(tg_ecotypeid,colnames(uq))
+  grp_row
+}))
+rep_grps = rep_grps[,colSums(rep_grps>-1)>0]
+
+try_k = c(1,2,4,5,6,8,10,12,15)
+
+for (k in try_k) {
+  print(k)
+
+  sAll = RUVs(uq, rownames(uq), k=k, scIdx=rep_grps)
+
+  pdf(paste0(prefix.string,"RUVs_all_k",k,".pdf"),width=7,height=9)
+  par(mfrow=c(2,1))
+  plotPCA(sAll$normalizedCounts[,pd2_include],
+          pch=par_batch[,pch01],
+          bg=par_batch[,col01], labels=FALSE,
+          cex=1, cex.axis=1, cex.lab=1,
+          main=paste0("k=",k))
+  
+  plotPCA(sAll$normalizedCounts[,pd2_include],
+          pch=par_batch[,pch01],
+          bg=par_batch[,grp01], labels=FALSE,
+          cex=1, cex.axis=1, cex.lab=1)
+  dev.off()
+}
+@
+
+<<RUVs_all_grpbat>>=
+max_nrep = max(laply(salk_tx_grpbat,length))
+
+grpbat_repgrps = do.call("rbind",llply(salk_tx_grpbat,function(tg_ecotypeid0) {
+  grp_row = rep(-1,max_nrep)
+  tg_ecotypeid = intersect(paste0("X",tg_ecotypeid0),colnames(uq))
+  if (length(tg_ecotypeid)>0) {
+      grp_row[1:length(tg_ecotypeid)] = match(tg_ecotypeid,colnames(uq))
+  }
+   grp_row
+}))
+
+grpbat_repgrps = grpbat_repgrps[rowSums(grpbat_repgrps>-1)>0,colSums(grpbat_repgrps>-1)>0]
+
+try_k = c(1,2,4,5,6,8,10,12,15)
+
+foreach (k = try_k) %dopar% {
+  print(k)
+
+  sAll = RUVs(uq, rownames(uq), k=k, scIdx=grpbat_repgrps)
+
+  pdf(paste0(prefix.string,"RUVs_all_grpbat_k",k,".pdf"),width=7,height=9)
+  par(mfrow=c(2,1))
+  plotPCA(sAll$normalizedCounts[,pd2_include],
+          pch=par_batch[,pch01],
+          bg=par_batch[,col01], labels=FALSE,
+          cex=1, cex.axis=1, cex.lab=1,
+          main=paste0("k=",k))
+  
+  plotPCA(sAll$normalizedCounts[,pd2_include],
+          pch=par_batch[,pch01],
+          bg=par_batch[,grp01], labels=FALSE,
+          cex=1, cex.axis=1, cex.lab=1)
+  dev.off()
+}
+@
+
+<<test_RUVs>>=
+test_RUVs<-function(x,cIdx,try_k,repgrp_list,prefix.fig) {
+    
+    max_nrep = max(laply(seq_along(repgrp_list),function(i),length(repgrp_list[[i]])))
+    repgrp = do.call("rbind",llply(repgrp_list,function(tg_ecotypeid0) {
+        grp_row = rep(-1,max_nrep)
+        tg_ecotypeid = intersect(paste0("X",tg_ecotypeid0),colnames(x))
+        if (length(tg_ecotypeid)>0) {
+            grp_row[1:length(tg_ecotypeid)] = match(tg_ecotypeid,colnames(x))
+        }
+        grp_row
+    }))
+    repgrp = repgrp[rowSums(repgrp>-1)>0,colSums(repgrp>-1)>0]
+    
+    foreach (k = try_k) %dopar% {
+        print(k)
+        
+        sAll = RUVs(x, rownames(x), k=k, scIdx=repgrp)
+        
+        pdf(paste0(prefix.fig,k,".pdf"),width=7,height=9)
+        par(mfrow=c(2,1))
+        plotPCA(sAll$normalizedCounts[,pd2_include],
+                pch=par_batch[,pch01],
+                bg=par_batch[,col01], labels=FALSE,
+                cex=1, cex.axis=1, cex.lab=1,
+                main=paste0("k=",k))
+        
+        plotPCA(sAll$normalizedCounts[,pd2_include],
+                pch=par_batch[,pch01],
+                bg=par_batch[,grp01], labels=FALSE,
+                cex=1, cex.axis=1, cex.lab=1)
+        dev.off()
+    }
+}
+@ 
+
+<<RUVs_all_grp_k>>= 
+try_k = c(1,2,4,5,6,8,10,12,15)
+test_RUVs(uq,rownames(uq),try_k,salk_tx_grp,paste0(prefix.string,'RUVs_all_grp_k'))
+@
+
+<<RUVs_21ref_grp_k>>= 
+try_k = c(1,2,4,5,6,8,10,12,15)
+test_RUVs(uq,ath_19acc_21ref[,AGI],try_k,salk_tx_grp,paste0(prefix.string,'RUVs_21ref_grp_k'))
+@
+
+<<test_RUVg>>=
+test_RUVg<-function(x,cIdx,try_k,prefix.fig) {
+    
+    foreach (k = try_k) %dopar% {
+        print(k)
+        
+        gNorm = RUVg(x,cIdx,k=k)
+        
+        pdf(paste0(prefix.fig,k,".pdf"),width=7,height=9)
+        par(mfrow=c(2,1))
+        plotPCA(gNorm$normalizedCounts[,pd2_include],
+                pch=par_batch[,pch01],
+                bg=par_batch[,col01], labels=FALSE,
+                cex=1, cex.axis=1, cex.lab=1,
+                main=paste0("k=",k))
+        
+        plotPCA(gNorm$normalizedCounts[,pd2_include],
+                pch=par_batch[,pch01],
+                bg=par_batch[,grp01], labels=FALSE,
+                cex=1, cex.axis=1, cex.lab=1)
+        dev.off()
+    }
+}
+@ 
+
+<<RUVg_21ref_k>>= 
+try_k = c(1,2,3,4,5,6,10,12,15)
+test_RUVg(uq,ath_19acc_21ref[,AGI],try_k,paste0(prefix.string,'RUVg_21ref_k'))
+@
+
+<<>>=
+test_RUVg_by_deg<-function(x,group,cIdx,try_k,fig.prefix,fig.width,fig.height,fig.mfrow) {
+    y = DGEList(counts=x,group=group)
+    design = model.matrix(~group)
+    y = calcNormFactors(y,method="upperquartile")
+    y = estimateGLMCommonDisp(y,design,verbose=TRUE)
+    y = estimateGLMTagwiseDisp(y,design)
+    fit = glmFit(y,design)
+    
+    # ANOVA like tests
+    lrt = glmLRT(fit,coef=2:10)
+    topUQFC = topTags(lrt,n=Inf)$table
+    pdf(paste0(fig.prefix,'.pdf'),width=fig.width,height=fig.height)
+    par(mfrow=fig.mfrow)
+    hist(topUQFC$PValue,main="",xlab="p-value",breaks=100)
+
+    hlist = foreach (k = try_k) %dopar% {
+        print(k)
+        gNorm = RUVg(x,cIdx,k=k)
+        design = model.matrix(~group + gNorm$W)
+        y = DGEList(counts=x,group=group)
+        y = calcNormFactors(y,method="upperquartile")
+        y = estimateGLMCommonDisp(y,design,verbose=TRUE)
+        y = estimateGLMTagwiseDisp(y,design)
+        fit = glmFit(y,design)
+        lrt = glmLRT(fit, coef=2:10)
+        topRsFC = topTags(lrt, n=Inf)$table
+        hist(topRsFC$PValue,breaks=100,plot=FALSE)
+    }
+    for (i in seq(along=try_k)) {
+        plot(hlist[[i]],main=paste0("k=",i),xlab="p-value")
+    }
+    dev.off()
+}
+
+try_k = c(1,2,3,4,5,6,10,12,15)
+
+test_RUVg_by_deg(hts_count2,pd2$group,ath_19acc_21ref[,AGI],try_k,
+                 paste0(prefix.string,'RUVg_21ref_deg'),10,12,c(4,3))
+@ 
+
+
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

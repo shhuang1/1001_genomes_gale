@@ -1,0 +1,331 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(edgeR)
+library(DESeq2)
+library(ggplot2)
+library(NMF)
+library(RColorBrewer)
+library(R.utils)
+library(Vennerable)
+library(vsn)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+counts_mat_file = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-04-21",
+                           "ath1001_tx_norm_2016-04-21-filtered01_1001g.csv")
+ruvg_rdata_file = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-04-21","ath1001_tx_norm_2016-04-21-UQ_RUVg_21ref.RData")
+vsd_rdata_file = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-04-21","ath1001_tx_norm_2016-04-21-uq_vsd_blind_list.RData")
+
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"hypo_diff_exp_2016-05-03")
+prefix.string = file.path(this_analysis_path,"graphics","hypo_diff_exp_2016-05-03-")
+rdata_prefix = file.path(this_analysis_path,'hypo_diff_exp_2016-05-03-')
+step_list = "load_lrt"
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/hypo_diff_exp_2016-05-03')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Differential gene expression between hypo-methylated and normal methylated accessions}
+\date{May 3, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Using count matrix and associated files \\ \verb|\Sexpr{counts_mat_file}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+Try to call DE using RUVg with $k=2,3,4,5$ and compare number of DEG.
+
+<<load_ruvg>>=
+load(ruvg_rdata_file) # loaded RUVg_21ref_uq,uqMat
+counts_mat0 = read.table(counts_mat_file,sep=',',header=TRUE,row.names=1)
+countsMat = as.matrix(counts_mat0)
+
+# hypo- and hyper-methylated accessions from Rosa's first growth batch (see Joe's email April 28, 2016 8:21am; April 27, 2016 12:51pm)
+hypo = avgm[Tissue=='Leaf' & Sequenced_By=='SALK' & CMT2_mCHH<0.1 & RdDM_mCHH<0.1,tg_ecotypeidx]
+
+rbatch1_hypo = salk_mc_rosa_batch1[,list(tg_ecotypeidx=tg_ecotypeidx,
+                                         hypo=tg_ecotypeidx %in% hypo)]
+
+rbatch1_hyper = avgm[Tissue=='Leaf' & Sequenced_By=='SALK' & CMT2_mCHH>0.15 & RdDM_mCHH>0.3 & tg_ecotypeidx %in% salk_mc_rosa_batch1[,tg_ecotypeidx],tg_ecotypeidx]
+
+acc_tx_1001g = intersect(colnames(countsMat),acc_list_1001g[,tg_ecotypeidx])
+design_1001g = data.frame(
+    tg_ecotypeidx=with(acc_list_1001g,{
+        tg_ecotypeidx[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    tg_ecotypeid=with(acc_list_1001g,{
+        tg_ecotypeid[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    group=with(acc_list_1001g,{# admixture groups
+        group[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    relict=with(acc_list_1001g,{ # relict is "Y" or "" based on info from 1001G paper
+        relict[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    hypo1=with(rbatch1_hypo,{# hypo-methylated vs not in Rosa's growth batch 1
+        hypo[match(acc_tx_1001g,tg_ecotypeidx)]
+    }),
+    stringsAsFactors=FALSE)
+
+design_1001g = within(design_1001g,{
+    # groups from admixture: relict, admixed, or non-relict
+    group2 = factor(ifelse(group=='relict','relict',ifelse(group=='admixed','admixed','non-relict')))
+    # relict or non-relict based on 'Y' or '' from 1001G table
+    group3 = factor(ifelse(relict=='Y','relict','non-relict'))
+    hypo11 = factor(ifelse(hypo1==TRUE,1,0))
+    hypo_nsw = factor(ifelse(group=='north_sweden',ifelse(hypo1==TRUE,1,0),NA))
+    hypo_ssw = factor(ifelse(group=='south_sweden',ifelse(hypo1==TRUE,1,0),NA))
+})
+
+# subset to the common accessions with genome data
+countsMat = countsMat[,acc_tx_1001g]
+normalizedCounts = lapply(RUVg_21ref_uq,function(rg) {
+  rg$normalizedCounts[,acc_tx_1001g]
+  })
+W =  lapply(names(RUVg_21ref_uq),function(ri) {
+  rg = RUVg_21ref_uq[[ri]]
+  Wi = rg$W
+  rownames(Wi) = colnames(rg$normalizedCounts)
+  Wi = Wi[acc_tx_1001g,]
+  return(Wi)
+})
+names(W) = names(RUVg_21ref_uq)
+
+load(vsd_rdata_file) # loaded vsdL,ddsMatL
+vsd_mat = lapply(vsdL,function(v) {
+  vm = assay(v)
+  colnames(vm) = colData(v)$tg_ecotypeidx
+  vm = vm[,acc_tx_1001g]
+  return(vm)
+})
+vsd = lapply(vsdL,function(v) {
+  v = v[,match(acc_tx_1001g,v$tg_ecotypeidx)]
+  v$group = design_1001g[,'group']
+  v$relict = design_1001g[,'relict']
+  v$tg_ecotypeid = design_1001g[,'tg_ecotypeid']
+  return(v)
+})
+@ 
+
+<<DE,cache=FALSE>>=
+design_list = list(hypo1=within(subset(design_1001g,!is.na(hypo11)), { cmp=hypo11 }),
+                   hypo_nsw=within(subset(design_1001g,!is.na(hypo_nsw)),{ cmp=hypo_nsw }),
+                   hypo_ssw=within(subset(design_1001g,!is.na(hypo_ssw)),{ cmp=hypo_ssw })
+                   )
+    
+if ("load_lrt" %in% step_list) {
+    load(paste0(rdata_prefix,'lrt_list.RData'))
+} else {
+
+    lrt_list = llply(design_list,function(des) {    
+        acc_curr = as.character(des[,'tg_ecotypeidx'])
+        cmp = droplevels(des[,'cmp'])
+        print(cmp)
+        target_coef = ifelse(rep(nlevels(cmp)==2,times=nlevels(cmp)-1),2,2:nlevels(cmp))
+        print(target_coef)
+        
+        # no batch correction
+        y = DGEList(counts=countsMat[,acc_curr],group=cmp)
+        desFull = model.matrix(~cmp)
+        y = calcNormFactors(y,method="upperquartile")
+        y = estimateGLMCommonDisp(y,desFull,verbose=TRUE)
+        y = estimateGLMTagwiseDisp(y,desFull)
+        fit = glmFit(y,desFull)
+        lrt0 = glmLRT(fit, coef=target_coef)
+
+        # RUV correction with k=2,3,4,5
+        lrt_k = llply(W,function(Wk) {
+          y = DGEList(counts=countsMat[,acc_curr],group=cmp)
+          W_curr = Wk[acc_curr,]
+          desFull = model.matrix(~cmp + W_curr)
+          y = calcNormFactors(y,method="upperquartile")
+          y = estimateGLMCommonDisp(y,desFull,verbose=TRUE)
+          y = estimateGLMTagwiseDisp(y,desFull)
+          fit = glmFit(y,desFull)
+          lrt = glmLRT(fit, coef=target_coef)
+        },.parallel=TRUE)
+        
+        return(c(list('0'=lrt0),lrt_k))
+    },.parallel=TRUE)
+
+    save(lrt_list,file=paste0(rdata_prefix,'lrt_list.RData'))
+}
+
+topTable_list = llply(lrt_list,function(lrt) {
+    llply(lrt,function(lrt_k) {
+      topTags(lrt_k,n=Inf,p.value=1)$table
+    })
+})
+@
+
+<<topDEGenes_list>>=
+topDEGenes_list0 = lapply(topTable_list,function(tt) {
+    mapply(function(tt_k) {
+      list(top2=rownames(subset(tt_k,FDR<=0.05)))
+    },tt,SIMPLIFY=FALSE)
+})
+
+topDEGenes_list0 = unlist(unlist(topDEGenes_list0,recursive=FALSE),recursive=FALSE)
+topDEGenes_list = topDEGenes_list0[lapply(topDEGenes_list0,length)<=5000]
+@
+
+<<num_deg,fig.width=1.6,fig.height=1.9>>=
+deg_count = ldply(topTable_list,function(tt) {
+  ldply(tt,function(tt_k) {
+    nrow(subset(tt_k,FDR<=0.05))
+  },.id="k")
+},.id="name.exp")
+
+p8a = ggplot(subset(deg_count,name.exp %in% c('hypo_nsw','hypo_ssw')),
+             aes(x=k,y=V1,group=name.exp,color=name.exp))
+p8b = p8a + geom_line() + geom_point(size=0.7)
+p8c = p8b + scale_x_discrete("RUVg k=") +
+  scale_y_continuous("Number of diff. exp. genes",limits=c(0,140),breaks=seq(0,140,by=20)) +
+  scale_color_discrete("Hypomethylated\nvs normal",limits=c('hypo_nsw','hypo_ssw'),
+                             labels=c("north_sweden",
+                                      "south_sweden")) +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+          axis.text.x=element_text(size=5),
+          axis.title.y=element_text(size=6),
+          axis.text.y=element_text(size=5),
+          legend.text=element_text(size=5),
+          legend.title=element_text(size=6),
+          legend.key.size=unit(0.8,"line"))
+#          legend.position="top") +
+#  guides(colour=guide_legend(ncol=1,title.position="top"))
+
+pdf(paste0(prefix.string,"num_deg_swe.pdf"),width=2.4,height=1.4)
+print(p8c)
+dev.off()
+@ 
+
+<<num_deg_k4,fig.width=1.4,fig.height=1.1>>=
+p8a = ggplot(subset(deg_count,k==4),aes(x=name.exp,y=V1)) 
+p8b = p8a + geom_bar(stat="identity",width=0.6) + geom_text(aes(y=V1+50,label=V1),size=1.5,hjust=0) +
+    coord_flip()
+p8c = p8b + scale_x_discrete("",limits=c('allgroups','allgroups2','rvnr','hypo1'),
+                             labels=c("All groups",
+                                      "All groups\nexcluding admixed",
+                                      "Relict vs\nNon-relict",
+                                      "Hypomethylatedvs\nnon-hypomethylated")) +
+    scale_y_continuous("Number of diff. exp. genes") +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+          axis.text.x=element_text(size=5,angle=45,hjust=1),
+          axis.title.y=element_text(size=6),
+          axis.text.y=element_text(size=5))
+#pdf(paste0(prefix.string,"num_deg_k4.pdf"),width=1.4,height=1.1)
+print(p8c)
+#dev.off()
+@ 
+
+<<venn_deg_k4>>=
+deg_k4_list = llply(topTable_list,function(tt) {
+    tt_k = tt[['4']]
+    rownames(subset(tt_k,FDR<=0.05))
+})
+
+pdf(paste0(prefix.string,'venn_deg_k4.pdf'),width=3,height=3)
+venn = Venn(deg_k4_list[c('allgroups2','rvnr')])
+plot(venn,doWeights=TRUE)
+dev.off()
+@ 
+
+<<venn_deg_k4_hypo>>=
+pdf(paste0(prefix.string,'venn_deg_k4_hypo.pdf'),width=4,height=4)
+venn = Venn(deg_k4_list[c('allgroups2','rvnr','hypo1')])
+plot(venn,doWeights=TRUE)
+dev.off()
+@ 
+
+<<k4_W_hypo>>=
+W_annot = ldply(design_list,function(des) {
+    acc_curr = as.character(des[,'tg_ecotypeidx'])
+    ldply(W,function(Wk) {
+          data.frame(cmp=des[,'cmp'],Wk[acc_curr,])
+    },.id="k")
+},.id="name.exp")
+
+W_annot_k4 = subset(W_annot,k==4)
+
+pdf(paste0(prefix.string,"k4_hypo_W12.pdf"),width=4,height=1.6)
+p7a = ggplot(data=W_annot_k4,aes(color=factor(cmp)))
+p7b = p7a + geom_point(aes(x=W_1,y=W_2),size=0.5,alpha=0.6) + facet_wrap(~name.exp)
+p7c = p7b + scale_color_discrete("",breaks=c(0,1),labels=c("Normal","Hypomethylated")) +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+        axis.text.x=element_text(size=5,angle=90,hjust=1,vjust=0.5),
+        axis.title.y=element_text(size=6),
+        axis.text.y=element_text(size=5),
+        legend.text=element_text(size=5),
+        legend.title=element_text(size=6),
+        legend.key.size=unit(0.5,"line"),
+        strip.text=element_text(size=6))
+print(p7c)
+dev.off()
+
+pdf(paste0(prefix.string,"k4_hypo_W23.pdf"),width=4,height=1.6)
+p7a = ggplot(data=W_annot_k4,aes(color=factor(cmp)))
+p7b = p7a + geom_point(aes(x=W_2,y=W_3),size=0.5,alpha=0.6) + facet_wrap(~name.exp)
+p7c = p7b + scale_color_discrete("",breaks=c(0,1),labels=c("Normal","Hypomethylated")) +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+        axis.text.x=element_text(size=5,angle=90,hjust=1,vjust=0.5),
+        axis.title.y=element_text(size=6),
+        axis.text.y=element_text(size=5),
+        legend.text=element_text(size=5),
+        legend.title=element_text(size=6),
+        legend.key.size=unit(0.5,"line"),
+        strip.text=element_text(size=6))
+print(p7c)
+dev.off()
+
+@ 
+
+<<sessionInfo>>=    
+sessionInfo()
+@
+
+\end{document}
+

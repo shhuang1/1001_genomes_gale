@@ -1,0 +1,142 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(plyr)
+library(RColorBrewer)
+library(R.utils)
+library(scales)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"eqtl_general_stats_2016-02-07")
+prefix.string = file.path(this_analysis_path,"graphics","eqtl_general_stats_2016-02-07-")
+rdata_prefix = file.path(this_analysis_path,"eqtl_general_stats_2016-02-07-")
+step_list = c("save_results","run_ruvg_21ref")
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/eqtl_general_stats_2016-02-07-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{eQTL general statistics}
+\date{February 7, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Using eQTL test results in \verb|\Sexpr{eqtl_09_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<thr_master>>=
+thr_info = data.frame(thr_name=c('1e5','1e6','1e7','1e8','1e9','1e10'),
+                      thr_val=c(1e-5,1e-6,1e-7,1e-8,1e-9,1e-10),
+                      stringsAsFactors=FALSE)
+
+thr_master = rbindlist(alply(thr_info,1,function(thr) {
+  dt = fread(sprintf('%s/results/lmm_master/chr1-5genes_%s.bed.sorted',eqtl_09_path,thr[1,'thr_name']))
+  cbind(data.table(thr),dt)
+}))
+
+thr_master_uniqpos = rbindlist(alply(thr_info,1,function(thr) {
+  dt = fread(sprintf('%s/results/lmm_master/chr1-5genes_%s.bed.sorted.uniq',eqtl_09_path,thr[1,'thr_name']))
+  cbind(data.table(thr),dt)
+}))
+@
+
+<<num_genes_with_eqtl,fig.width=1.2,fig.height=1.2>>=
+num_genes = thr_master[thr_name!='1e5',list(num_genes=length(unique(V4))),by="thr_name"]
+
+p1a = ggplot(data=num_genes,aes(x=thr_name,y=num_genes))
+p1b = p1a + geom_bar(stat="identity")
+p1c = p1b + scale_x_discrete("eQTL threshold",limits=c('1e7','1e8','1e9'),
+                   labels=c("1e-7","1e-8","1e-9")) +
+  scale_y_continuous("Number of genes") +
+  theme_bw() +
+  theme(axis.title.x=element_text(size=8),
+        axis.text.x=element_text(size=6,angle=45,hjust=1),
+        axis.title.y=element_text(size=8),
+        axis.text.y=element_text(size=6))
+
+#pdf(paste0(prefix.string,'num_genes_with_eqtl.pdf'),width=1.2,height=1.2)
+print(p1c)
+#dev.off()
+@
+
+<<num_genes_pos_eqtl,fig.width=2.4,fig.height=1.8>>=
+num_pos = thr_master_uniqpos[thr_name!='1e5',list(num_pos=.N),,by="thr_name"]
+num_genes_pos = merge(num_genes,num_pos,by="thr_name")
+
+base_breaks <- function(n = 10){
+        function(x) {
+                    axisTicks(log10(range(x, na.rm = TRUE)), log = TRUE, n = n)
+        }
+}
+
+p2a = ggplot(data=num_genes_pos,aes(x=num_pos,y=num_genes))
+p2b = p2a + geom_point(aes(shape=factor(thr_name)))# + geom_point(aes(colour=factor(thr_name)),size=4) +
+#    geom_point(colour="grey90",size=1.5)
+p2c = p2b + scale_shape_discrete("eQTL\nthreshold",breaks=paste0("1e",6:10),labels=paste0("1e",-6:-10)) +
+#    scale_x_continuous("Number of positions",trans = 'log10',
+#                       breaks = trans_breaks('log10', function(x) 10^x),
+#                       labels = trans_format('log10', math_format(10^.x)))
+   scale_x_continuous("Number of positions",trans = log_trans(), breaks = base_breaks()) +
+  scale_y_continuous("Number of genes") +
+  theme_bw() +
+  theme(axis.title.x=element_text(size=8),
+        axis.text.x=element_text(size=6,angle=45,hjust=1),
+        axis.title.y=element_text(size=8),
+        axis.text.y=element_text(size=6),
+        legend.title=element_text(size=8),
+        legend.text=element_text(size=6),
+        legend.key.size = unit(1, "line"))
+
+#pdf(paste0(prefix.string,'num_genes_pos_eqtl.pdf'),width=1.2,height=1.2)
+print(p2c)
+#dev.off()
+@ 
+
+
+<<sessionInfo>>=    
+sessionInfo()
+@
+
+
+\end{document}

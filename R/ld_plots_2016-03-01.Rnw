@@ -1,0 +1,131 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(Hmisc)
+library(plyr)
+library(R.utils)
+source("get_file_paths.R")
+@
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ld_plots_2016-03-01")
+prefix.string = file.path(this_analysis_path,"graphics","ld_plots_2016-03-01-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/ld_plots_2016-03-1-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 Genomes LD plots}
+\date{March 1, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Genome matrix data in \\ \verb|\Sexpr{gmi_rel_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<read_ld_data>>=
+# read LD
+ld_by_chrom = alply(1:5,1,function(chrom) {
+    ld = fread(file.path(gmi_rel_path,paste0('1001genomes_snp-short-indel_only_ACGTN_',chrom,'_r2.ld')))
+    ld = ld[,distkb:=(BP_B-BP_A)/1000]
+    ld = ld[,grp:=cut(distkb,0:100,labels=FALSE)]
+})
+@ 
+
+<<r2mean_by_chrom>>=
+r2mean_by_chrom = ldply(ld_by_chrom,function(ld) {
+    ld[,list(R2=mean(R2),
+             N=length(na.omit(R2)),
+             se=sqrt(var(R2,na.rm=TRUE)/length(na.omit(R2)))),
+       by="grp"]
+},.id="chrom")
+
+chr_labeller = paste0("chr",1:5)
+names(chr_labeller) = as.character(1:5)
+
+p1a = ggplot(data=subset(r2mean_by_chrom,N>=100),aes(x=as.numeric(grp),y=R2))
+p1b = p1a + geom_point(size=0.5) + 
+    geom_errorbar(aes(ymin=R2-se,ymax=R2+se),width=0.8,size=0.4) +
+    geom_line(size=0.4) +
+    facet_grid(X1~.,scales="free_y",labeller=labeller(X1=chr_labeller))
+p1c = p1b + scale_x_continuous("Distance (kb)") +
+    scale_y_continuous("Mean R2") +
+    theme_bw() +
+    theme(axis.text.x=element_text(size=5),
+          axis.text.y=element_text(size=5),
+          axis.title.x=element_text(size=6),
+          axis.title.y=element_text(size=6),
+          strip.text.y=element_text(size=5))
+
+pdf(paste0(prefix.string,'r2mean_by_chrom.pdf'),width=2,height=3)
+print(p1c)
+dev.off()
+@
+
+<<r2mean>>=
+r2mean = rbindlist(ld_by_chrom)[,list(R2=mean(R2),
+             N=length(na.omit(R2)),
+             se=sqrt(var(R2,na.rm=TRUE)/length(na.omit(R2)))),
+       by="grp"]
+
+p2a = ggplot(data=subset(r2mean,N>=100),aes(x=as.numeric(grp),y=R2))
+p2b = p2a + geom_point(size=0.5) + 
+    geom_errorbar(aes(ymin=R2-se,ymax=R2+se),width=0.6,size=0.5) +
+    geom_line(size=0.5) 
+p2c = p2b + scale_x_continuous("Distance (kb)") +
+    scale_y_continuous("Mean R2, all chromosomes") +
+    theme_bw() +
+    theme(axis.text.x=element_text(size=5),
+          axis.text.y=element_text(size=5),
+          axis.title.x=element_text(size=6),
+          axis.title.y=element_text(size=6))
+
+pdf(paste0(prefix.string,'r2mean.pdf'),width=2,height=2)
+print(p2c)
+dev.off()
+@ 
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

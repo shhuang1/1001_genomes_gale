@@ -1,0 +1,162 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(jsonlite)
+library(plyr)
+library(R.utils)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"parse_snpmatch_2017-02-27")
+prefix.string = file.path(this_analysis_path,"graphics","parse_snpmatch_2017-02-27-")
+rdata_prefix = file.path(this_analysis_path,"parse_snpmatch_2017-02-27-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/parse_snpmatch_2017-02-27-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Parsing SNPmatch analysis of RNA-seq SNPs}
+\date{February 27, 2017}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+\section{Read SNPmatch results}
+
+<<read_snpmatch>>=
+ecotype_list_nomatch = fread(ecotype_list_nomatch_file)
+ecotype_list_mixup = fread(ecotype_list_mixup_file)
+ecotype_list_snpmatch = list.files(snpmatch_1001g_01_path)
+
+parse_snpmatch_top3<-function(ecotype_list,ecotype_list_snpmatch) {
+    adply(ecotype_list,1,function(acc) {
+        ecotype_id = as.character(acc[1,ID])
+        print(ecotype_id)
+        if (ecotype_id %in% ecotype_list_snpmatch) {   
+            
+            match_files = list.files(path=file.path(snpmatch_1001g_01_path,ecotype_id),pattern=glob2rx('*.matches.json'))
+            match_list = sapply(match_files,function(f) {
+                fromJSON(file.path(snpmatch_1001g_01_path,ecotype_id,f),flatten=FALSE)
+            },simplify=FALSE)
+            names(match_list) = gsub('_\\.matches\\.json','',names(match_list))
+        match_df = ldply(match_list,function(ml) {
+            maxtop = min(3,nrow(ml[['matches']]))
+            df = data.frame(ml[['interpretation']][['text']],1:maxtop,ml[['matches']][1:maxtop,,drop=FALSE])
+            colnames(df) = c('1001Gmatch_interpretation','1001Gmatch_top3_rank','1001Gmatch_top3_ID','1001Gmatch_top3_v2','1001Gmatch_top3_v3','1001Gmatch_top3_v4')
+            return(df)
+        },.id="Tx_run")
+            return(match_df)
+    }
+    })
+}
+
+snpmatch_nomatch = parse_snpmatch_top3(ecotype_list_nomatch,ecotype_list_snpmatch)
+snpmatch_mixup = parse_snpmatch_top3(ecotype_list_mixup,ecotype_list_snpmatch)
+
+write.table(snpmatch_nomatch,paste0(rdata_prefix,'NOMATCH_strains_by_tx.txt'),sep='\t',
+            col.names=TRUE,row.names=FALSE,quote=FALSE)
+write.table(snpmatch_mixup,paste0(rdata_prefix,'MIXUP_strains_by_tx.txt'),sep='\t',
+            col.names=TRUE,row.names=FALSE,quote=FALSE)
+@
+
+
+<<read_snpmatch2>>=
+parse_snpmatch_scores_top3<-function(ecotype_list,ecotype_list_snpmatch) {
+    
+    match_all = adply(ecotype_list,1,function(acc) {
+        ecotype_id = as.character(acc[1,ID])
+        print(ecotype_id)
+        if (ecotype_id %in% ecotype_list_snpmatch) {   
+            
+
+            match_files = list.files(path=file.path(snpmatch_1001g_01_path,ecotype_id),pattern=glob2rx('*.scores.txt'))
+            match_list = sapply(match_files,function(f) {
+                dt = fread(file.path(snpmatch_1001g_01_path,ecotype_id,f))
+                dt[,X1001Gmatch_rank:=rank(-V4)]
+            },simplify=FALSE)
+            names(match_list) = gsub('_\\.scores\\.txt','',names(match_list))
+            
+            match_df = ldply(match_list,function(ml) {
+                df = data.frame(X1001Gmatch_ID=ml[,V1],X1001Gmatch_rank=ml[,X1001Gmatch_rank],X1001Gmatch_prob=ml[,V4])
+                return(df)
+            },.id="Tx_run")            
+            return(match_df)
+        }
+    })
+    
+    top3_acc = subset(match_all,X1001Gmatch_rank<=3)[,X1001Gmatch_ID]
+    match_top3 = match_all[X1001Gmatch_ID %in% top3_acc,]
+    
+    return(match_top3)
+    
+}
+
+snpmatch_scores = parse_snpmatch_scores_top3(rbind(ecotype_list_nomatch[,list(ID,name,Verify='NOMATCH')],
+                                                   ecotype_list_mixup[,list(ID,name,Verify='MIXUP')]),
+                                            ecotype_list_snpmatch)
+
+
+snpmatch_scores_wide = reshape(snpmatch_scores[,list(Tx_run,Verify,X1001Gmatch_ID,X1001Gmatch_prob)],idvar=c("Tx_run","Verify"),timevar="X1001Gmatch_ID",v.names="X1001Gmatch_prob",direction="wide")
+colnames(snpmatch_scores_wide) = sub('X1001Gmatch_prob.','',colnames(snpmatch_scores_wide))
+rownames(snpmatch_scores_wide) = snpmatch_scores_wide[,Tx_run]
+snpmatch_scores_df = data.frame(snpmatch_scores_wide,row.names=snpmatch_scores_wide[,Tx_run])
+
+nmf.options(grid.patch=TRUE)
+pdf(paste0(prefix.string,'match_scores.pdf'),width=20,height=20)
+aheatmap(subset(snpmatch_scores_df,select=-c(Tx_run,Verify)),
+         color="YlOrRd:100",cellwidth=6,cellheight=6,
+         annRow=snpmatch_scores_df[,'Verify'],
+         cexCol=10,
+         Rowv=NA,Colv=NA)
+dev.off()
+@ 
+
+
+\section{Section info}
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

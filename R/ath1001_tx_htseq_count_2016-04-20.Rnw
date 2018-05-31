@@ -1,0 +1,122 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(plyr)
+library(R.utils)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ath1001_tx_htseq_count_2016-04-20")
+prefix.string = file.path(this_analysis_path,"graphics","ath1001_tx_htseq_count_2016-04-20-")
+rdata_prefix = file.path(this_analysis_path,"ath1001_tx_htseq_count_2016-04-20-")
+step_list = "write_gene_count_mat"
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path='cache/ath1001_tx_htseq_counts_2016-04-20-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome gene count matrix, filtered out low mapped fastq's}
+\date{April 20, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item rmake data in \\ \verb|\Sexpr{tfq_gale2_path}|.
+\item rmake filtered fastq in \\ \verb|Sexpr{rmake_fq_keep1_file}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+This section takes all FASTQ/BAM files from each lane that pass mapping rate filter (see \verb|rmake_stats_2016-04-19|), combines the read counts from these aligned BAM files for each accession to generate a count matrix.
+
+<<count_each_acc>>=
+rmake_fq_keep1 = fread(rmake_fq_keep1_file)
+
+ecotypeid = rmake_fq_keep1[1,tg_ecotypeid]
+gene_count_file = file.path(tfq_gale2_path,ecotypeid,paste0(rmake_fq_keep1[1,fq],'.bam.gene.count'))
+gene_count0 = fread(gene_count_file)
+gene_names = gene_count0[,V1]
+
+d_ply(rmake_fq_keep1,"tg_ecotypeid",function(acc_df) {
+  ecotypeid = acc_df[1,'tg_ecotypeid']
+  
+  gene_count0 = do.call("cbind",alply(acc_df,1,function(barcode_lane) {
+    gene_count_file0 = file.path(tfq_gale2_path,ecotypeid,paste0(barcode_lane[1,'fq'],'.bam.gene.count'))
+    dt = fread(gene_count_file0)
+    dt[match(gene_names,dt[,V1]),V2]
+  }))
+  colnames(gene_count0) = acc_df[,'fq']
+  rownames(gene_count0) = gene_names  
+  print(file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.gene.count2.matrix')))
+  write.table(gene_count0,file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.gene.count2.matrix')),
+              sep='\t',row.names=TRUE,col.names=NA,quote=FALSE)
+ 
+  gene_count1 = rowSums(gene_count0)
+  write.table(gene_count1,file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.gene.count2')),
+              sep='\t',row.names=gene_names,col.names=FALSE,quote=FALSE)
+  
+},.parallel=TRUE)
+@ 
+
+<<gene_count_mat>>=
+gene_count_list = dlply(rmake_fq_keep1,"tg_ecotypeid",function(acc_df) {
+  ecotypeid = acc_df[1,'tg_ecotypeid']
+  gene_count_file = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.gene.count2'))
+                                        #    print(gene_count_file)
+  dt = fread(gene_count_file)
+  return(dt[match(gene_names,dt[,V1]),V2])
+},.parallel=TRUE)
+
+gene_count_mat = do.call("cbind",gene_count_list)
+rownames(gene_count_mat) = gene_names
+if ("write_gene_count_mat" %in% step_list) {
+    write.table(gene_count_mat,paste0(rdata_prefix,"count_chr.tsv"),
+                sep="\t",row.names=T,col.names=NA,quote=F)
+    rownames(gene_count_mat) = sapply(strsplit(gene_names,'!'),'[',2)
+    write.table(gene_count_mat,paste0(rdata_prefix,"count.tsv"),
+                sep="\t",row.names=T,col.names=NA,quote=F)
+    
+}
+@
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

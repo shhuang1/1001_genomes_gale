@@ -1,0 +1,600 @@
+import collections
+import csv
+import glob
+import gzip
+import itertools
+import os
+from pathlib import Path
+import re
+
+# Define SEPINC as shell environment variable
+SNAKERULES = os.environ.get('SNAKERULES')
+PROJ_NAME = "1001_genomes"
+DEPDIR = "deps"
+include:
+    SNAKERULES + "/Doc.defs.top"
+
+PROJ_PYTHON_PATH_GALE = DEVEL_PATH_GALE + "/1001_genomes_gale/python"
+########################
+# paths for 1001 data
+########################
+ATH_AUTOSOMES = list(range(1,6))
+TFQ_OBERON5 = OBERON_DATA + "/data1/shhuang/data/1001_genomes/tfq_oberon5"
+TFQ_GALE1 = OBERON_DATA + "/data1/shhuang/data/1001_genomes/tfq_gale1"
+TFQ_GALE2 = OBERON_DATA + "/data1/shhuang/data/1001_genomes/tfq_gale2"
+TFQ_GALE3 = OBERON_DATA + "/data1/shhuang/data/1001_genomes/tfq_gale3"
+Col0_tx_fastq = "/gale/netapp/seq2/illumina_runs/160318_BARB_4112_AH3CFJBBXX/Unaligned_single_index/1001_transcriptomes"
+HCHEN_1001 = OBERON_DATA + "/data3/hchen/1001"
+RESULTS_ALLC = HCHEN_1001 + "/results"
+TAIJI_DMR = OBERON_DATA + "/data4/riverwin/1001/DMRs"
+TAIJI_dmC_bins = OBERON_DATA + "/data4/riverwin/1001/dmC_bins"
+TAIJI_ALLC = "/gale/netapp/seq3/illumina_runs/taiji/1001/allc"
+
+ALLC = PROJ_DATA_PATH_GALE + '/allc'
+MPI_RELEASE_v31 = PROJ_DATA_PATH_GALE + '/gmi_release_v3.1'
+MPI_RELEASE_v31_VCFGZ = MPI_RELEASE_v31 + '/1001genomes_snp-short-indel_only_ACGTN.vcf.gz'
+MPI_RELEASE_v31_SNPEFF = MPI_RELEASE_v31 + '/1001genomes_snpeff_v3.1/1001genomes_snp-short-indel_only_ACGTN_v3.1.vcf.snpeff.gz'
+
+SNPMATCH_1001G_H5 = PROJ_DATA_PATH_GALE + '/strain_verify/1001genomes.hdf5'
+SNPMATCH_1001G_ACC_H5 = PROJ_DATA_PATH_GALE + '/strain_verify/1001genomes.acc.hdf5'
+
+STAR_2P_INDEX1 = OBERON_DATA + '/data1/shhuang/data/1001_genomes/star_2p_index1'
+STAR_2P_MAP1 = OBERON_DATA + '/data1/shhuang/data/1001_genomes/star_2p_map1'
+STAR_2P_MAP2 = OBERON_DATA + '/data1/shhuang/data/1001_genomes/star_2p_map2'
+STAR_2P_MAP2 = OBERON_DATA + '/data1/shhuang/data/1001_genomes/star_2p_map2'
+
+GATK_TX_VAR1 = OBERON_DATA + '/data3/shhuang/projects/1001_genomes/gatk_tx_var01'
+GATK_TX_VAR2 = OBERON_DATA + '/data3/shhuang/projects/1001_genomes/gatk_tx_var02'
+
+SNPMATCH_1001G_01 = PROJ_RESULTS_PATH_GALE + '/snpmatch_1001G_01'
+
+ECOTYPE_LIST = list(filter(lambda y:os.path.isdir(os.path.join(TFQ_GALE2,y)),os.listdir(TFQ_GALE2)))
+rule ecotype_list:
+    shell: "echo {ecotype_list}"
+ecotype_pat = re.compile('.+\-(16C|10C)$')
+ECOTYPE_LIST_SALK = list(filter(lambda x:ecotype_pat.match(x)==None,ECOTYPE_LIST))
+rule ecotype_list_salk:
+    shell: "echo {ECOTYPE_LIST_SALK}"
+ECOTYPE_LIST_G = [re.sub(".vcf.gz$","",re.sub("^intersection_","",os.path.basename(p))) for p in glob.glob(MPI_RELEASE_v31+'/intersection_snp_short_indel_vcf/*.vcf.gz')]
+ECOTYPE_LIST_MIXUP0 = [
+'1819',
+'6680',
+'7063',
+'7125',
+'7138',
+'7250',
+'7307',
+'7418',
+'7566',
+'8387',
+'9312',
+'9314',
+'9437',
+'9503',
+'9622',
+'9632',
+'9642',
+'9658',
+'9739',
+'9761',
+'9790',
+'9908',
+'9910',
+'9911',
+'9912',
+'9914',
+'9927',
+'9928',
+'9929',
+'9935',
+'82',
+'84',
+'137',
+'151',
+'167',
+'227',
+'266',
+'337',
+'369',
+'407',
+'461',
+'1391',
+'4997',
+'5282',
+'5299',
+'5310',
+'5331',
+'5335',
+'5337',
+'5339',
+'5350',
+'5364',
+'5373',
+'5385',
+'5386',
+'5590',
+'5712',
+'5727',
+'5787',
+'5923',
+'5924',
+'5932',
+'5939',
+'5948',
+'5959',
+'5994',
+'5997',
+'6197',
+'6199',
+'6425',
+'6930',
+'7151',
+'7524',
+'8266',
+'8348',
+'8374',
+'8412',
+'8616',
+'8954',
+'8957',
+'8967',
+'9385'
+]
+ECOTYPE_LIST_MIXUP = set(ECOTYPE_LIST_MIXUP0).intersection(set(ECOTYPE_LIST_SALK))
+ECOTYPE_LIST_NOMATCH0 = [
+'6198',
+'6990',
+'7164',
+'7218',
+'7280',
+'7332',
+'7377',
+'7415',
+'7417',
+'7427',
+'8354',
+'8420',
+'9592',
+'9608',
+'9610',
+'9615',
+'9624',
+'9646',
+'9655',
+'9657',
+'9659',
+'9661',
+'9691',
+'9697',
+'9707',
+'9709',
+'9714',
+'9716',
+'9723',
+'9727',
+'9729',
+'9735',
+'9737',
+'9741',
+'9747',
+'9909',
+'9915',
+'9917',
+'9920',
+'9921',
+'9924',
+'9930',
+'9932',
+'9937',
+'196',
+'206',
+'222',
+'296',
+'309',
+'322',
+'367',
+'374',
+'387',
+'417',
+'1068',
+'1073',
+'1132',
+'1318',
+'1733',
+'1745',
+'1941',
+'1959',
+'1966',
+'2160',
+'2300',
+'4632',
+'4675',
+'4757',
+'4862',
+'4980',
+'5106',
+'5141',
+'5159',
+'5292',
+'5322',
+'5678',
+'5710',
+'5829',
+'5914',
+'5926',
+'5968',
+'5975',
+'5998',
+'6004',
+'6129',
+'6939',
+'7116',
+'7206',
+'7252',
+'7300',
+'7457',
+'8225',
+'8314',
+'8325',
+'8353',
+'8378',
+'8423',
+'8619',
+'8724',
+'8760',
+'8774',
+'8777',
+'8824',
+'8969',
+'8985',
+'9011',
+'9165',
+'9201',
+'9302',
+'9356',
+'9472',
+'9490']
+ECOTYPE_LIST_NOMATCH = set(ECOTYPE_LIST_NOMATCH0).intersection(set(ECOTYPE_LIST_SALK))
+
+def acc_all(path,ecotype_list=ECOTYPE_LIST):
+    return [path.format(tg_ecotypeid=tg_ecotypeid) for tg_ecotypeid in ecotype_list]
+def acc_all_dep(path,path_dep,ecotype_list=ECOTYPE_LIST):
+    return [path.format(tg_ecotypeid=tg_ecotypeid) for tg_ecotypeid in ecotype_list if os.path.isfile(path_dep.format(tg_ecotypeid=tg_ecotypeid))]
+
+rule x:
+    shell: "echo {GALE_HOME} {THUMPER1_HOME}"
+
+#################
+# allc to HDF5
+#################
+rule allc_to_h5:
+    input: lambda wc: expand(TAIJI_ALLC + '/allc_{tg_ecotypeid}_{chrom}.tsv',tg_ecotypeid=wc.tg_ecotypeid,chrom=ATH_AUTOSOMES)
+    params: allc_prefix=TAIJI_ALLC + '/allc_{tg_ecotypeid}_',\
+            allc_suffix='.tsv'
+    log: ALLC + '/allc_{tg_ecotypeid}.h5.log'
+    output: ALLC + '/allc_{tg_ecotypeid}.h5'
+    shell: """
+        unset PYTHONPATH; module load shhuang anaconda/2.4.1; python {DEVEL_PATH_GALE}/dap_hs/python/allc2h5.py {params.allc_prefix} {params.allc_suffix} {output}
+    """
+
+rule allc_to_h5_out:
+   input: acc_all(ALLC + '/allc_{tg_ecotypeid}.h5',ecotype_list=['6909_pub'])
+
+
+######################################
+# calling SNPs based on RNA-seq reads
+######################################
+rule star_2pass_index1:
+    input: sjdb=TFQ_GALE2 + '/{tg_ecotypeid}/{tg_ecotypeid}.bam.junctions.merged.bed'
+    params: genome_fa=GENOMES_TAIR10_SEQ_FASTA,
+            D=STAR_2P_INDEX1+"/{tg_ecotypeid}",\
+            tmp_dir='./_STARtmp/{tg_ecotypeid}',\
+            threads=11,N="s2pi_{tg_ecotypeid}",qname="gale.q"
+    log:  STAR_2P_INDEX1 + "/{tg_ecotypeid}/star_2pass_index.log"
+    output: STAR_2P_INDEX1 + "/{tg_ecotypeid}/SA"
+    shell: """
+        module load rna-star/2.4.2a;
+        mkdir -p {params.D}
+        STAR --runMode genomeGenerate --genomeDir {params.D} --genomeFastaFiles {params.genome_fa} --sjdbFileChrStartEnd {input.sjdb} --sjdbOverhang 99 --outTmpDir {params.tmp_dir} --runThreadN {params.threads}
+    """    
+rule star_2pass_index1_out:
+    input: acc_all(STAR_2P_INDEX1+'/{tg_ecotypeid}/SA',ecotype_list=ECOTYPE_LIST_SALK)
+#snakemake -s Snakefile_postpub -j 10 -k -p star_2pass_index1_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+
+def get_acc_fastq(fq_path,ecotype_list=ECOTYPE_LIST): # accession number to list of FASTQs
+    acc_fastq = dict((tg_ecotypeid,glob.glob(os.path.join(fq_path,tg_ecotypeid,tg_ecotypeid+'_*L*_R1_*fastq.gz')))
+                      for tg_ecotypeid in ecotype_list)
+    return acc_fastq
+
+def get_acc_fqbase(fq_path,ecotype_list=ECOTYPE_LIST): # accession number to list of FASTQ base names
+    acc_fqbase = dict()
+    for tg_ecotypeid in ecotype_list:
+        fq_list = glob.glob(os.path.join(fq_path,tg_ecotypeid,tg_ecotypeid+'_*L*_R1_*fastq.gz'))
+        fqbase_list = [re.sub('\.fastq\.gz$','',os.path.basename(f)) for f in fq_list]
+        acc_fqbase[tg_ecotypeid] = fqbase_list
+    return acc_fqbase
+
+def get_run_fqbase(fqbase_list): # accession+run name to list of FASTQ basenames
+    fq_pat = re.compile('^([a-zA-Z0-9]+)_(\d+_[A-Za-z]+_\d+_)?([a-zA-Z0-9]+)_([A-Z0-9]+)_L\d+_R\d+_\d+$')
+    run_fqbase = collections.defaultdict(list)
+    for f_base in fqbase_list:
+        fq_match = fq_pat.match(f_base)
+        tg_ecotypeid,fcname,fcid,barcode = fq_match.groups()
+        if fcname==None:
+            fcname = 'BARB_'+fcid
+        run = tg_ecotypeid+"_"+fcname
+        run_fqbase[run].append(f_base)
+    return run_fqbase
+
+def get_rg_list(fq_list,prog='STAR'): # read groups
+    fq_pat = re.compile('^([a-zA-Z0-9]+)_((\d+)_([A-Za-z]+)_(\d+)_)?([a-zA-Z0-9]+)_([A-Z0-9]+)_(L\d+)_R\d+_\d+.fastq.gz$')
+    rg_list = []
+    for f in fq_list:
+        fq_match = fq_pat.match(os.path.basename(f))
+        tg_ecotypeid,fcname,t,machine,run,fcid,barcode,lane = fq_match.groups()
+        if machine==None:
+            machine = 'BARB'
+        if run==None:
+            run = fcid
+        rg_id = '.'.join([machine,run,lane,barcode])
+        rg_lb = '.'.join([tg_ecotypeid,barcode])
+        rg_sm = tg_ecotypeid
+        rg_pl = 'ILLUMINA'
+        rg_pu = '.'.join([fcid,lane,barcode])
+        if (prog=='STAR'):
+            rg_line = "ID:%s PU:%s SM:%s PL:%s LB:%s"%(rg_id,rg_pu,rg_sm,rg_pl,rg_lb)
+        elif prog=='PICARD':
+            rg_line = "RGID=%s RGPU=%s RGSM=%s RGPL=%s RGLB=%s"%(rg_id,rg_pu,rg_sm,rg_pl,rg_lb)
+        rg_list.append(rg_line)
+    return rg_list
+
+def fill_acc_fqbase(path,acc_fqbase,ecotype_list):# path contains "{tg_ecotypeid}" and "{fqbase}"
+    return [path.format(tg_ecotypeid=tg_ecotypeid,fqbase=fqbase)\
+            for tg_ecotypeid in ecotype_list for fqbase in acc_fqbase[tg_ecotypeid]]
+def fill_run(path,run_list): # path contains "{run}"
+    return expand(path,run=run_list)
+
+TFQ_GALE2_ACCFQ = get_acc_fastq(TFQ_GALE2,ECOTYPE_LIST_SALK)
+TFQ_GALE2_ACCFQBASE = get_acc_fqbase(TFQ_GALE2,ECOTYPE_LIST_SALK)
+TFQ_GALE2_RUNFQBASE = dict((tg_ecotypeid,get_run_fqbase(TFQ_GALE2_ACCFQBASE[tg_ecotypeid]))\
+                            for tg_ecotypeid in ECOTYPE_LIST_SALK)
+
+rule star_2pass_map1:
+    input: r1=lambda wc: TFQ_GALE2_ACCFQ[wc.tg_ecotypeid]
+    params: r1_list=lambda wc: ",".join(TFQ_GALE2_ACCFQ[wc.tg_ecotypeid]),\
+            rg_list=lambda wc: " , ".join(get_rg_list(TFQ_GALE2_ACCFQ[wc.tg_ecotypeid])),\
+            genome_dir=STAR_2P_INDEX1 + "/{tg_ecotypeid}",\
+            genome_fa=GENOMES_TAIR10_SEQ_FASTA,\
+            D=STAR_2P_MAP1+"/{tg_ecotypeid}",\
+            out_pref=STAR_2P_MAP1+"/{tg_ecotypeid}/{tg_ecotypeid}.",\
+            tmp_dir='./_STARtmp/{tg_ecotypeid}',\
+            threads=11,N="s2pm_{tg_ecotypeid}",qname="gale.q"
+    log: STAR_2P_MAP1 + "/{tg_ecotypeid}/00run.log"
+    output: STAR_2P_MAP1 + "/{tg_ecotypeid}/{tg_ecotypeid}.bam"
+    shell: """
+        module load rna-star/2.4.2a;
+        mkdir -p {params.D}
+        STAR --genomeDir {params.genome_dir} --readFilesIn {params.r1_list} --readFilesCommand zcat --outFileNamePrefix {params.out_pref} --outSAMunmapped Within --outSAMtype BAM SortedByCoordinate --outSAMattrRGline {params.rg_list}  --outTmpDir {params.tmp_dir} --runThreadN {params.threads} --limitBAMsortRAM 4204770897
+    """
+rule star_2pass_map1_out:
+    input: acc_all(STAR_2P_MAP1+'/{tg_ecotypeid}/{tg_ecotypeid}.Aligned.sortedByCoord.out.bam',ecotype_list=ECOTYPE_LIST_SALK)
+#snakemake -s Snakefile_postpub -j 10 -k -p star_2pass_map1_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+
+rule star_2pass_map2:# one BAM per FASTQ
+    input: r1=TFQ_GALE2 + "/{tg_ecotypeid}/{unit}.fastq.gz"
+    params: rgstar=lambda wc:get_rg_list([TFQ_GALE2 + "/%s/%s.fastq.gz"%(wc.tg_ecotypeid,wc.unit)],prog='STAR')[0],\
+            rgpicard=lambda wc:get_rg_list([TFQ_GALE2 + "/%s/%s.fastq.gz"%(wc.tg_ecotypeid,wc.unit)],prog='PICARD')[0],\
+            genome_dir=STAR_2P_INDEX1 + "/{tg_ecotypeid}",\
+            genome_fa=GENOMES_TAIR10_SEQ_FASTA,\
+            D=STAR_2P_MAP2+"/{tg_ecotypeid}",\
+            out_pref=STAR_2P_MAP2+"/{tg_ecotypeid}/{unit}.",\
+            tmp_dir='./_STARtmp/{unit}',\
+            threads=11,N="s2pm_{tg_ecotypeid}",qname="gale.q"
+    log: STAR_2P_MAP2 + "/{tg_ecotypeid}/{unit}.snake.log"
+    output: STAR_2P_MAP2 + "/{tg_ecotypeid}/{unit}.bam"
+    shell: """
+        module load rna-star/2.4.2a java/jdk-8u102-linux-64 samtools/1.2;
+        mkdir -p {params.D}
+        STAR --genomeDir {params.genome_dir} --readFilesIn {input.r1} --readFilesCommand zcat --outFileNamePrefix {params.out_pref} --outSAMunmapped Within --outSAMtype BAM SortedByCoordinate --outSAMattrRGline {params.rgstar}  --outTmpDir {params.tmp_dir} --runThreadN {params.threads}
+        if [ `samtools view -c {params.out_pref}Aligned.sortedByCoord.out.bam` == '0' ]; then
+            samtools view -ht {params.genome_fa}.fai {params.out_pref}Aligned.sortedByCoord.out.bam | java -jar {PICARD_2p8_JAR} AddOrReplaceReadGroups I=/dev/stdin O={params.out_pref}bam SO=coordinate {params.rgpicard}
+            rm {params.out_pref}Aligned.sortedByCoord.out.bm
+        else
+            mv {params.out_pref}Aligned.sortedByCoord.out.bam {params.out_pref}bam
+        fi
+    """
+rule star_2pass_map2_out:
+    input: fill_acc_fqbase(STAR_2P_MAP2+'/{tg_ecotypeid}/{fqbase}.bam',\
+                           TFQ_GALE2_ACCFQBASE,\
+                           ECOTYPE_LIST_NOMATCH.union(ECOTYPE_LIST_MIXUP))
+#snakemake -s Snakefile_postpub -j 10 -k -p star_2pass_map2_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+rule star_2pass_map2_out2:
+    shell: "echo {rules.star_2pass_map2_out.input}"
+
+rule star_2pass_map2_duplist:
+    input: bam=lambda wc: expand(STAR_2P_MAP2+'/{tg_ecotypeid}/{fqbase}.bam',\
+                                 tg_ecotypeid=wc.tg_ecotypeid,\
+                                 fqbase=TFQ_GALE2_RUNFQBASE[wc.tg_ecotypeid][wc.run])
+    params: D=STAR_2P_MAP2 + '/{tg_ecotypeid}',\
+            N="mdup_{tg_ecotypeid}",\
+            qname="gale.q"
+    log: STAR_2P_MAP2 + '/{tg_ecotypeid}/{run}.dedupped.log'
+    output: bamlist=STAR_2P_MAP2 + "/{tg_ecotypeid}/{run}.dedupped.list"
+    shell: """
+        echo {input.bam} | sed 's/ /\\n/g' > {output.bamlist}
+    """
+rule star_2pass_map2_duplist_out:
+    input: [fill_run(STAR_2P_MAP2+"/{tg_ecotypeid}/{{run}}.dedupped.list".format(tg_ecotypeid=tg_ecotypeid),\
+                     run_list=list(TFQ_GALE2_RUNFQBASE[tg_ecotypeid].keys()))\
+                     for tg_ecotypeid in ECOTYPE_LIST_NOMATCH.union(ECOTYPE_LIST_MIXUP)\
+                     ]
+                   
+rule star_2pass_map2_dup:
+    input: bam=lambda wc: expand(STAR_2P_MAP2+'/{tg_ecotypeid}/{fqbase}.bam',\
+                                 tg_ecotypeid=wc.tg_ecotypeid,\
+                                 fqbase=TFQ_GALE2_RUNFQBASE[wc.tg_ecotypeid][wc.run])
+    params: bamlist=lambda wc: expand(' I='+STAR_2P_MAP2+'/{tg_ecotypeid}/{fqbase}.bam',\
+                                      tg_ecotypeid=wc.tg_ecotypeid,\
+                                      fqbase=TFQ_GALE2_RUNFQBASE[wc.tg_ecotypeid][wc.run]),\
+            D=STAR_2P_MAP2 + '/{tg_ecotypeid}',\
+            N="mdup_{tg_ecotypeid}",\
+            qname="gale.q"
+    log: STAR_2P_MAP2 + '/{tg_ecotypeid}/{run}.dedupped.log'
+    output: bam=STAR_2P_MAP2 + "/{tg_ecotypeid}/{run}.dedupped.bam",\
+            metrics=STAR_2P_MAP2 + "/{tg_ecotypeid}/{run}.dedupped_metrics.txt"
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64 samtools/1.2
+        java -jar {PICARD_2p8_JAR} MarkDuplicates {params.bamlist} O={output.bam} CREATE_INDEX=true VALIDATION_STRINGENCY=SILENT M={output.metrics}
+    """
+rule star_2pass_map2_dup_out:
+    input: [fill_run(STAR_2P_MAP2+"/{tg_ecotypeid}/{{run}}.dedupped.bam".format(tg_ecotypeid=tg_ecotypeid),\
+                     run_list=list(TFQ_GALE2_RUNFQBASE[tg_ecotypeid].keys()))\
+                     for tg_ecotypeid in ECOTYPE_LIST_NOMATCH.union(ECOTYPE_LIST_MIXUP)\
+                     ]
+#snakemake -s Snakefile_postpub -j 10 -k -p star_2pass_map2_dup_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+GATK_TX_VAR_ACC_OPT = {'split':{'9747':'-allowPotentiallyMisencodedQuals'}}
+GATK_TX_VAR_RUN_OPT = {'split':{'9915_140612_HAL_1323_':'-allowPotentiallyMisencodedQuals'},
+                       'hc':{'9747_140612_HAL_1323_':'-allowPotentiallyMisencodedQuals'}
+                       }
+rule gatk_tx_var01_dup:
+    input: bam=STAR_2P_MAP1 + "/{tg_ecotypeid}/{tg_ecotypeid}.Aligned.sortedByCoord.out.bam"
+    params: D=GATK_TX_VAR1 + '/{tg_ecotypeid}',\
+            N="mdup_{tg_ecotypeid}",\
+            qname="gale.q"
+    log: GATK_TX_VAR1 + '/{tg_ecotypeid}/00_markdup.log'
+    output: bam=GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_dedupped.bam',\
+            metrics=GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_dedupped_metrics.txt'
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64 samtools/1.2
+        samtools view -H {input.bam} | grep -v @RG > {output.bam}.header
+        samtools view -H {input.bam} | grep @RG | sort -u >> {output.bam}.header
+        java -jar {PICARD_2p8_JAR} MarkDuplicates I={input.bam} O=/dev/stdout VALIDATION_STRINGENCY=SILENT M={output.metrics} QUIET=true COMPRESSION_LEVEL=0 | samtools reheader {output.bam}.header - > {output.bam}
+        java -jar {PICARD_2p8_JAR} BuildBamIndex I={output.bam}
+    """
+rule gatk_tx_var01_dup_out:
+    input: acc_all(GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_dedupped.bam',ecotype_list=ECOTYPE_LIST_MIXUP.union(ECOTYPE_LIST_NOMATCH))
+#snakemake -s Snakefile_postpub -j 10 -k -p gatk_tx_var01_dup_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+
+rule gatk_tx_var01_split:
+    input: bam=GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_dedupped.bam'
+    params: D=GATK_TX_VAR1 + '/{tg_ecotypeid}',\
+            N="spl_{tg_ecotypeid}",\
+            acc_opts=lambda wc: GATK_TX_VAR_ACC_OPT['split'].get(wc.tg_ecotypeid,''),\
+            qname="gale.q"
+    log: GATK_TX_VAR1 + '/{tg_ecotypeid}/01_split.log'
+    output: bam=GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_split.bam'
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64; java -jar {GATK_3p7_JAR} -T SplitNCigarReads -R {GENOMES_TAIR10_SEQ_FASTA} -I {input.bam} -o {output.bam} -rf ReassignOneMappingQuality -RMQF 255 -RMQT 60 -U ALLOW_N_CIGAR_READS {params.acc_opts}
+    """
+rule gatk_tx_var01_split_out:
+    input: acc_all(GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_split.bam',ecotype_list=ECOTYPE_LIST_MIXUP.union(ECOTYPE_LIST_NOMATCH))
+#snakemake -s Snakefile_postpub -j 10 -k -p gatk_tx_var01_split_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+rule gatk_tx_var02_split:
+    input: bam=STAR_2P_MAP2 + '/{tg_ecotypeid}/{run}.dedupped.bam'
+    params: D=GATK_TX_VAR2 + '/{tg_ecotypeid}',\
+            N="spl_{tg_ecotypeid}",\
+            run_opts=lambda wc: GATK_TX_VAR_RUN_OPT['split'].get(wc.run,''),\
+            qname="gale.q"
+    log: GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.split.log'
+    output: bam=GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.split.bam'
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64; java -jar {GATK_3p7_JAR} -T SplitNCigarReads -R {GENOMES_TAIR10_SEQ_FASTA} -I {input.bam} -o {output.bam} -rf ReassignOneMappingQuality -RMQF 255 -RMQT 60 -U ALLOW_N_CIGAR_READS {params.run_opts}
+    """
+rule gatk_tx_var02_split_out:
+    input: [fill_run(GATK_TX_VAR2 + '/{tg_ecotypeid}/{{run}}.split.bam'.format(tg_ecotypeid=tg_ecotypeid),\
+                     run_list=list(TFQ_GALE2_RUNFQBASE[tg_ecotypeid].keys()))\
+                     for tg_ecotypeid in ECOTYPE_LIST_NOMATCH.union(ECOTYPE_LIST_MIXUP)\
+                     ]
+#snakemake -s Snakefile_postpub -j 10 -k -p gatk_tx_var02_split_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+rule gatk_tx_var01_hc01:
+    input: bam=GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_split.bam'
+    params: D=GATK_TX_VAR1 + '/{tg_ecotypeid}',\
+            N="hc_{tg_ecotypeid}",\
+            qname="gale.q"
+    log: GATK_TX_VAR1 + '/{tg_ecotypeid}/02_hc01.log'
+    output: vcf=GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_hc01.vcf'
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64; java -jar {GATK_3p7_JAR} -T HaplotypeCaller -R {GENOMES_TAIR10_SEQ_FASTA} -I {input.bam} -dontUseSoftClippedBases -stand_call_conf 20.0 -o {output.vcf}
+    """
+rule gatk_tx_var01_hc01_out:
+    input: acc_all(GATK_TX_VAR1 + '/{tg_ecotypeid}/{tg_ecotypeid}_hc01.vcf',ecotype_list=ECOTYPE_LIST_MIXUP.union(ECOTYPE_LIST_NOMATCH))
+#snakemake -s Snakefile_postpub -j 10 -k -p gatk_tx_var01_hc01_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+rule gatk_tx_var02_hc01:
+    input: bam=GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.split.bam'
+    params: D=GATK_TX_VAR2 + '/{tg_ecotypeid}',\
+            N="hc_{tg_ecotypeid}",\
+            run_opts=lambda wc: GATK_TX_VAR_RUN_OPT['hc'].get(wc.run,''),\
+            qname="gale.q"
+    log: GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.hc01.log'
+    output: vcf=GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.hc01.vcf'
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64; java -jar {GATK_3p7_JAR} -T HaplotypeCaller -R {GENOMES_TAIR10_SEQ_FASTA} -I {input.bam} -dontUseSoftClippedBases -stand_call_conf 20.0 -o {output.vcf} {params.run_opts}
+    """
+
+rule gatk_tx_var02_hc01_out:
+    input: [fill_run(GATK_TX_VAR2 + '/{tg_ecotypeid}/{{run}}.hc01.vcf'.format(tg_ecotypeid=tg_ecotypeid),\
+                    run_list=list(TFQ_GALE2_RUNFQBASE[tg_ecotypeid].keys())) \
+            for tg_ecotypeid in ECOTYPE_LIST_NOMATCH.union(ECOTYPE_LIST_MIXUP)\
+           ]
+
+#snakemake -s Snakefile_postpub -j 10 -k -p gatk_tx_var02_hc01_out --cluster "mkdir -p {params.D}; qsub -wd {params.D} -l qname={params.qname} -N {params.N} -j y -V -o {log}"
+
+rule gatk_tx_var02_pf01:
+    input: vcf=GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.hc01.vcf'
+    params: D=GATK_TX_VAR2 + '/{tg_ecotypeid}',\
+            N="pf_{tg_ecotypeid}",\
+            qname="gale.q"
+    log: GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.pf01.log'
+    output: vcf=GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.pf01.vcf'
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64; java -jar {GATK_3p7_JAR} -T VariantFiltration -R {GENOMES_TAIR10_SEQ_FASTA} -V {input.vcf} -window 35 -cluster 3 -filterName FS -filter "FS > 30.0" -filterName QD -filter "QD < 2.0" -o {output.vcf}
+    """
+
+rule gatk_tx_var02_pf01_out:
+    input: [fill_run(GATK_TX_VAR2 + '/{tg_ecotypeid}/{{run}}.pf01.vcf'.format(tg_ecotypeid=tg_ecotypeid),\
+                    run_list=list(TFQ_GALE2_RUNFQBASE[tg_ecotypeid].keys())) \
+            for tg_ecotypeid in ECOTYPE_LIST_NOMATCH.union(ECOTYPE_LIST_MIXUP)\
+           ]
+
+#########################
+# Match to 1001G strains
+#########################
+rule snpmatch_1001g_01:
+    input: vcf=GATK_TX_VAR2 + '/{tg_ecotypeid}/{run}.pf01.vcf',\
+           db_h5=SNPMATCH_1001G_H5,\
+           db_acc_h5=SNPMATCH_1001G_ACC_H5
+    params: D=SNPMATCH_1001G_01 + '/{tg_ecotypeid}',\
+            out_pref=SNPMATCH_1001G_01 + '/{tg_ecotypeid}/{run}',\
+            N="match_{tg_ecotypeid}",\
+            qname="gale.q"
+    log: SNPMATCH_1001G_01 + '/{tg_ecotypeid}/{run}.matches.log'
+    output: SNPMATCH_1001G_01 + '/{tg_ecotypeid}/{run}.matches.json'
+    shell: """
+        unset PYTHONPATH; module load shhuang anaconda/2.4.1
+        snpmatch inbred -i {input.vcf} -d {input.db_h5} -e {input.db_acc_h5} -o {params.out_pref}
+    """
+rule snpmatch_1001g_01_out:
+    input: [fill_run(SNPMATCH_1001G_01 + '/{tg_ecotypeid}/{{run}}.matches.json'.format(tg_ecotypeid=tg_ecotypeid),\
+                    run_list=list(TFQ_GALE2_RUNFQBASE[tg_ecotypeid].keys())) \
+            for tg_ecotypeid in ECOTYPE_LIST_NOMATCH.union(ECOTYPE_LIST_MIXUP)\
+           ]
+
+###########################
+# SnpEff
+###########################
+rule snpsift_extract_ann01:
+    input: MPI_RELEASE_v31_SNPEFF
+    output: MPI_RELEASE_v31 + '/1001genomes_snpeff_v3.1_extract/1001genomes_snp-short-indel_only_ACGTN_v3.1.extract-ann01.txt'
+    shell: """
+        module load shhuang java/jdk-8u102-linux-64
+        zcat {input} | {SNPEFF_4p1L_SCRIPTS}/vcfEffOnePerLine.pl | java -jar {SNPSIFT_4p1L_JAR} extractFields - CHROM POS REF ALT "ANN[*].EFFECT" > {output}
+    """
+
+       

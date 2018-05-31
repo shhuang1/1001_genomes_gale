@@ -1,0 +1,708 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{amsmath,array,booktabs}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(GGally)
+library(NMF)
+library(plyr)
+library(R.utils)
+library(reshape2)
+library(scales)
+library(stringr)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"rmake_stats_2016-04-19")
+prefix.string = file.path(this_analysis_path,"graphics","rmake_stats_2016-04-19-")
+rdata_prefix = file.path(this_analysis_path,"rmake_stats_2016-04-19-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+#opts_chunk$set(cache.rebuild = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/rmake_stats_2016-04-19-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome stats from the rmake pipeline}
+\date{April 19, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item rmake data in \\ \verb|\Sexpr{tfq_gale2_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+\section{Read mapping rates}
+
+<<mapped_dt,echo=FALSE,results="hide">>=
+sample_id_salk = get_samples_from_dir(data_dir=tfq_gale2_path,src='salk')
+
+mapped_dt = rbindlist(alply(sample_id_salk,1,function(ecotypeid) {
+    mapped_file = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.mapped'))
+  #print(mapped_file)
+  if (file.exists(mapped_file)) {
+    dt = fread(mapped_file)
+    return(cbind(tg_ecotypeid=ecotypeid,dt))
+  }
+},.parallel=T))
+
+mapped_dt_long = melt(mapped_dt,id.vars=c("tg_ecotypeid"),measure.vars=c("UNMAPPED","MAPPED"))
+
+if ("save_results" %in% step_list) {
+    write.table(mapped_dt,paste0(rdata_prefix,"bam_mapped.txt"),sep="\t",row.names=F,col.names=T,quote=F)
+}
+@
+
+<<mapped_ecdf,fig.width=4,fig.height=4>>=
+mapped_dt[,nSamples:=nrow(mapped_dt)]
+p3a = ggplot(data=mapped_dt,aes(x=MAPPED/1e6))
+p3b = p3a + geom_step(aes(nSamples=nSamples,y=(1-..y..) * nSamples),stat="ecdf") 
+p3c = p3b + scale_x_continuous("Minimum mapped reads (millions)",breaks=seq(0,130,by=10)) +
+  scale_y_continuous("Number of acccessions",breaks=seq(0,700,by=50)) +
+  theme_bw()
+print(p3c)
+@
+
+
+<<genebody_dt,echo=FALSE,results="hide">>=
+genebody_dt = rbindlist(alply(sample_id_salk,1,function(ecotypeid) {
+  gb_file = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.genebody'))                                                                    
+  if (file.exists(gb_file)) {
+    dt = fread(gb_file)
+    return(cbind(tg_ecotypeid=ecotypeid,dt))
+  }
+},.parallel=T))
+
+genebody_dt[,FRAC_READ:=COUNT/sum(COUNT),by=tg_ecotypeid]
+@
+
+<<genebody_frac_hm,echo=FALSE>>=
+genebody_frac_wide = reshape(genebody_dt[,list(tg_ecotypeid,PERCENTILE,FRAC_READ)],
+                             idvar=c("tg_ecotypeid"),
+                             timevar=c("PERCENTILE"),
+                             direction="wide")
+rownames(genebody_frac_wide) = genebody_frac_wide[,tg_ecotypeid]
+genebody_frac_wide[,tg_ecotypeid:=NULL]
+genebody_frac_wide = genebody_frac_wide[,paste0('FRAC_READ.',1:100),with=FALSE]
+genebody_frac_wide = genebody_frac_wide[rowSums(is.na(genebody_frac_wide))==0,]
+aheatmap(genebody_frac_wide*100,col="Reds:100", Colv=NA)
+@
+
+<<gc_dt,echo=FALSE,results="hide">>=
+gc_dt = rbindlist(alply(sample_id_salk,1,function(ecotypeid) {
+  gc_file = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.gc'))                                                                    
+  if (file.exists(gc_file)) {
+    dt = fread(gc_file)
+    return(cbind(tg_ecotypeid=ecotypeid,dt))
+  }
+},.parallel=T))
+
+gc_dt[,FRAC_READ:=COUNT/sum(COUNT),by=tg_ecotypeid]
+@
+
+<<gc_frac_hm,echo=FALSE>>=
+gc_frac_wide = reshape(gc_dt[,list(tg_ecotypeid,GC,FRAC_READ)],
+                             idvar=c("tg_ecotypeid"),
+                             timevar=c("GC"),
+                             direction="wide")
+rownames(gc_frac_wide) = gc_frac_wide[,tg_ecotypeid]
+gc_frac_wide[,tg_ecotypeid:=NULL]
+gc_frac_wide = gc_frac_wide[,paste0('FRAC_READ.',0:100),with=FALSE]
+gc_frac_wide = gc_frac_wide[rowSums(is.na(gc_frac_wide))==0,]
+aheatmap(gc_frac_wide*100,col="Reds:100", Colv=NA)
+@
+
+<<biotype_dt,echo=FALSE,results="hide">>=
+biotype_dt = rbindlist(alply(sample_id_salk,1,function(ecotypeid) {
+  biotype_file = file.path(tfq_gale2_path,ecotypeid,paste0(ecotypeid,'.bam.biotype'))
+  #print(biotype_file)
+  if (file.exists(biotype_file)) {
+    dt = fread(biotype_file)
+    return(cbind(tg_ecotypeid=ecotypeid,dt))
+  }
+},.parallel=F))
+
+biotype_dt[,FRAC_READ:=COUNT/sum(COUNT),by=tg_ecotypeid]
+@
+
+<<biotype_frac_hm,echo=FALSE>>=
+biotype_frac_wide = reshape(biotype_dt[,list(tg_ecotypeid,BIOTYPE,FRAC_READ)],
+                             idvar=c("tg_ecotypeid"),
+                             timevar=c("BIOTYPE"),
+                             direction="wide")
+rownames(biotype_frac_wide) = biotype_frac_wide[,tg_ecotypeid]
+biotype_frac_wide[,tg_ecotypeid:=NULL]
+biotype_frac_wide = biotype_frac_wide[,2:ncol(biotype_frac_wide),with=FALSE]
+biotype_frac_wide = biotype_frac_wide[rowSums(is.na(biotype_frac_wide))==0,]
+aheatmap(biotype_frac_wide[,!c("FRAC_READ.protein_coding","FRAC_READ.rRNA"),
+                           with=FALSE]*100,col="Reds:100", Colv=NA)
+@
+
+<<biotype_frac_hist,echo=FALSE>>=
+p1a = ggplot(biotype_dt,aes(x=FRAC_READ))
+p1b = p1a + geom_histogram() + facet_wrap(~BIOTYPE,scales="free")
+p1c = p1b + scale_y_continuous("Number of accessions") +
+  scale_x_continuous("Percent reads",labels=percent) +
+  theme_bw()
+print(p1c)
+@
+
+<<biotype_frac_bar,echo=FALSE>>=
+p2a = ggplot(biotype_dt[BIOTYPE!='protein_coding'],aes(y=FRAC_READ,x=factor(tg_ecotypeid),fill=BIOTYPE))
+p2b = p2a + geom_bar(stat="identity") + coord_flip()
+p2c = p2b + scale_y_continuous("Percent reads",labels=percent) +
+  theme_bw()
+print(p2c)
+@
+
+\section{Read mapping rates by lane}
+
+<<mapped_by_lane>>=
+lane_pat = "[0-9A-Za-z_]+_L[[:digit:]]+_R[[:digit:]]+_[[:digit:]]+.bam.mapped"
+mapped_by_fq = rbindlist(alply(sample_id_salk,1,function(ecotypeid) {
+  mapped_files = list.files(file.path(tfq_gale2_path,ecotypeid),lane_pat)
+  dt = rbindlist(alply(mapped_files,1,function(mf) {
+    dt = fread(file.path(tfq_gale2_path,ecotypeid,mf))
+    cbind(tg_ecotypeid=ecotypeid,bam_mapped=mf,dt)
+  }))
+},.parallel=T))
+
+fq0 = mapped_by_fq[,sub(".bam.mapped$","",bam_mapped)]
+fq = sub("^[0-9A-Za-z]+_","",fq0)
+fq_split = str_split_fixed(fq, "_", 8)
+mapped_by_fq = mapped_by_fq[,`:=`(fq=fq0,
+                                      fc=do.call(paste,c(data.frame(fq_split[,1:4],stringsAsFactors=FALSE),sep="_")),
+                                      barcode=fq_split[,5],
+                                      lane=fq_split[,6])]
+mapped_by_fq[,fc_lane:=paste(fc,lane,sep="_")]
+mapped_by_lane = mapped_by_fq[,list(MAPPED=sum(MAPPED),UNMAPPED=sum(UNMAPPED)),
+                              by=c("tg_ecotypeid","fc","barcode","lane","fc_lane")]
+
+mapped_by_lane_long = melt(mapped_by_lane,id.vars=c("tg_ecotypeid","fc","barcode","lane","fc_lane"),measure.vars=c("UNMAPPED","MAPPED"))
+@
+
+Check the few problematic lanes (mostly had problems demultiplexing).  See email with Joe Nery 2016-04-08.
+
+<<all_mapped_for_121019_HAL_1206_L005>>=
+checklane1 = "^121019_HAL_1206_AC10P7ACXX_L005"
+checklane1_acc = mapped_by_lane[grepl(checklane1,fc_lane),tg_ecotypeid]
+
+checklane1_mapped = mapped_dt_long[tg_ecotypeid %in% checklane1_acc]
+
+p4a = ggplot(data=checklane1_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+p4b = p4a + geom_bar(stat="identity",position="dodge")
+p4c = p4b + xlab(paste0("Ecotypes with data in\n",checklane1)) + 
+  ylab("Number of reads from all lanes") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p4c)
+@
+
+Samples from \verb|121019_HAL_1206_L005| seem to have enough reads from other lanes (Figure~\ref{fig:all_mapped_for_121019_HAL_1206_L005}).
+Accession 159 had a large fraction of unmapped reads.  Check the overall mapping rate in section below.
+
+<<acc159_mapped>>=
+acc159 = mapped_by_lane_long[tg_ecotypeid=='159',]
+
+p5a = ggplot(data=acc159,aes(x=fc_lane,y=value,fill=variable))
+p5b = p5a + geom_bar(stat="identity",position="dodge")
+p5c = p5b + xlab("Lane") + ylab("Number of reads") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+print(p5c)
+@
+
+<<all_mapped_for_121109_JONAS_2126_L008>>=
+checklane2 = "^121109_JONAS_2126_AD16R7ACXX_L008"
+checklane2_acc = mapped_by_lane[grepl(checklane2,fc_lane),tg_ecotypeid]
+
+checklane2_mapped = mapped_dt_long[tg_ecotypeid %in% checklane2_acc]
+
+p4a = ggplot(data=checklane2_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+p4b = p4a + geom_bar(stat="identity",position="dodge")
+p4c = p4b + xlab(paste0("Ecotypes with data in\n",checklane2)) + 
+  ylab("Number of reads from all lanes") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p4c)
+@
+
+Samples from \verb|121109_JONAS_2126_L008| seem to have enough reads from other lanes (Figure~\ref{fig:all_mapped_for_121109_JONAS_2126_L008}).
+
+<<all_mapped_for_120905_JONAS_2117_L008>>=
+checklane3 = "^120905_JONAS_2117_AC10NEACXX_L008"
+checklane3_acc = mapped_by_lane[grepl(checklane3,fc_lane),tg_ecotypeid]
+checklane3_mapped = mapped_dt_long[tg_ecotypeid %in% checklane3_acc]
+
+p4a = ggplot(data=checklane3_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+p4b = p4a + geom_bar(stat="identity",position="dodge")
+p4c = p4b + xlab(paste0("Ecotypes with data in\n",checklane3)) + 
+  ylab("Number of reads from all lanes") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p4c)
+@
+
+Samples from \verb|120905_JONAS_2117_L008| seem to have enough reads from other lanes (Figure~\ref{fig:all_mapped_for_120905_JONAS_2117_L008}).
+
+<<all_mapped_for_120927_HAL_1203_L001>>=
+checklane4 = "^120927_HAL_1203_AD16C2ACXX_L001"
+checklane4_acc = mapped_by_lane[grepl(checklane4,fc_lane),tg_ecotypeid]
+checklane4_mapped = mapped_dt_long[tg_ecotypeid %in% checklane4_acc]
+
+p4a = ggplot(data=checklane4_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+p4b = p4a + geom_bar(stat="identity",position="dodge")
+p4c = p4b + xlab(paste0("Ecotypes with data in\n",checklane4)) + 
+  ylab("Number of reads from all lanes") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p4c)
+@
+
+Samples from \verb|120927_HAL_1203_L001| seem to have enough reads from other lanes (Figure~\ref{fig:all_mapped_for_120927_HAL_1203_L001}).
+
+<<all_mapped_for_140721_HAL_1333_L001>>=
+checklane5 = "^140721_HAL_1333_AC1TN4ACXX_L001"
+checklane5_acc = mapped_by_lane[grepl(checklane5,fc_lane),tg_ecotypeid]
+checklane5_mapped = mapped_dt_long[tg_ecotypeid %in% checklane5_acc]
+
+p4a = ggplot(data=checklane5_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+p4b = p4a + geom_bar(stat="identity",position="dodge")
+p4c = p4b + xlab(paste0("Ecotypes with data in\n",checklane5)) + 
+  ylab("Number of reads from all lanes") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p4c)
+@
+
+Samples from \verb|120927_HAL_1203_L001| seem to have enough reads from other lanes (Figure~\ref{fig:all_mapped_for_120927_HAL_1203_L001}).
+
+<<all_mapped_for_130923_HAL_1275_L008>>=
+checklane6 = "^130923_HAL_1275_BD2E3MACXX_L008"
+checklane6_acc = mapped_by_lane[grepl(checklane6,fc_lane),tg_ecotypeid]
+checklane6_mapped = mapped_dt_long[tg_ecotypeid %in% checklane6_acc]
+
+p4a = ggplot(data=checklane6_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+p4b = p4a + geom_bar(stat="identity",position="dodge")
+p4c = p4b + xlab(paste0("Ecotypes with data in\n",checklane6)) + 
+  ylab("Number of reads from all lanes") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p4c)
+@
+
+Samples from \verb|130923_HAL_1275_L008| seem to have enough reads from other lanes (Figure~\ref{fig:all_mapped_for_130923_HAL_1275_L008}).  Accessions 4884, 7413 and 7917 had a large fraction of unmapped reads.  Check the overall mapping rate in section below.
+
+\section{Overall mapped rates}
+
+<<mapped_rate_dt>>=
+mapped_rate_dt = mapped_dt[,FRAC_MAPPED:=MAPPED/(UNMAPPED+MAPPED)]
+
+p6a = ggplot(mapped_rate_dt,aes(x=FRAC_MAPPED))
+p6b = p6a + geom_histogram(binwidth=0.05)
+p6c = p6b + xlab("Fraction mapped") + ylab("Number of accessions") +
+  theme_bw()
+print(p6c)
+@
+
+Accessions with mapped rates less than $0.75$:
+<<mapped_rate_75perc>>=
+mapped_rate_dt[FRAC_MAPPED<=0.75,][order(FRAC_MAPPED),]
+@
+
+Accession 9836 have low reads overall, so had already been excluding from transcriptome normalization calculations.
+
+Accession 9718 has the lowest rate mapped and was from only one lane \verb|lane_mapped_for_120802_JONAS_2112_L002|, but other samples in the same lane were fine (Figure~\ref{fig:lane_mapped_for_120802_JONAS_2112_L002})
+
+<<lane_mapped_for_120802_JONAS_2112_L002>>=
+checklane7 = "^120802_JONAS_2112_BC0R19ACXX_L002"
+checklane7_acc = mapped_by_lane[grepl(checklane7,fc_lane),tg_ecotypeid]
+checklane7_mapped = mapped_by_lane_long[tg_ecotypeid %in% checklane7_acc]
+
+p4a = ggplot(data=checklane7_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+p4b = p4a + geom_bar(stat="identity",position="dodge")
+p4c = p4b + xlab(paste0("Ecotypes with data in\n",checklane7)) + 
+  ylab("Number of reads from all lanes") +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+print(p4c)
+@
+
+<<acc_in_lanes_with_acc,cache=FALSE>>=
+# accessions that share the same lanes as the start_acc
+acc_in_lanes_with_acc<-function(mapped_by_lane,start_acc) {
+  acc_lanes = unique(mapped_by_lane[tg_ecotypeid==start_acc,fc_lane])
+  acc_lanes_mapped = mapped_by_lane_long[fc_lane %in% acc_lanes,]
+  
+  p7a = ggplot(acc_lanes_mapped,aes(x=tg_ecotypeid,y=value,fill=variable))
+  p7b = p7a + geom_bar(stat="identity",position="dodge") +
+    facet_wrap(~fc_lane,ncol=1)
+  p7c = p7b + xlab(paste("Ecotypes in the same lanes as",start_acc)) +
+    ylab("Number of reads") +
+    theme_bw() +
+    theme(axis.text.x=element_text(angle=90,vjust=0.5,hjust=1))
+  print(p7c)
+}
+@
+
+<<nucleotide_count_facet,cache=FALSE>>=
+nucleotide_count_facet<-function(mapped_by_lane,start_acc,more_acc) {
+  acc_lanes = unique(mapped_by_lane[tg_ecotypeid==start_acc,fc_lane])
+  acc_lanes_mapped = mapped_by_lane[fc_lane %in% acc_lanes & tg_ecotypeid %in% c(start_acc,more_acc),]
+  
+  fq_qc = rbindlist(alply(acc_lanes_mapped,1,function(row) {
+    stat_file = with(row,file.path(tfq_gale2_path,tg_ecotypeid,paste0(tg_ecotypeid,"_",fq,".fastq.gz.stats")))
+    print(stat_file)
+    stat0 = fread(stat_file)
+    stat = stat0[,lapply(.SD,function(x) x/stat0$count),.SDcols=paste0(c("A","C","G","T","N"),"_Count")]
+    cbind(row,column=stat0[,column],stat)
+  },.parallel=TRUE))
+  fq_qc_long = melt(fq_qc,
+                    id.vars=c("tg_ecotypeid","fc_lane","column"),
+                    measure.vars=c("A_Count","C_Count","G_Count","T_Count","N_Count"))
+  
+  p8a = ggplot(fq_qc_long,aes(x=column,y=value,color=variable))
+  p8b = p8a + geom_line() + facet_grid(fc_lane~tg_ecotypeid)
+  p8c = p8b + xlab("Position in read") +
+    scale_y_continuous("Percent nucleotide",labels=percent) +
+    scale_color_brewer("nuc",palette="Set1") +
+    theme_bw()
+  return(p8c)
+}
+@
+
+<<med_quality_facet,cache=FALSE>>=
+med_qual_facet<-function(mapped_by_lane,start_acc,more_acc) {
+  acc_lanes = unique(mapped_by_lane[tg_ecotypeid==start_acc,fc_lane])
+  acc_lanes_mapped = mapped_by_lane[fc_lane %in% acc_lanes & tg_ecotypeid %in% c(start_acc,more_acc),]
+  
+  fq_qc = rbindlist(alply(acc_lanes_mapped,1,function(row) {
+    stat_file = with(row,file.path(tfq_gale2_path,tg_ecotypeid,paste0(tg_ecotypeid,"_",fq,".fastq.gz.stats")))
+    print(stat_file)
+    stat0 = fread(stat_file)
+    cbind(row,stat0)
+  },.parallel=TRUE))
+  
+  p9a = ggplot(fq_qc,aes(x=column,y=med))
+  p9b = p9a + geom_line() + facet_grid(fc_lane~tg_ecotypeid) +
+    geom_hline(yintercept=30,linetype="longdash") 
+  p9c = p9b + xlab("Position in read") +
+    scale_y_continuous("Median quality") +
+    expand_limits(y=0) +
+    theme_bw()
+  return(p9c)
+}
+@
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='9718',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'9718')
+nucleotide_count_facet(mapped_by_fq,'9718',"")
+med_qual_facet(mapped_by_fq,'9718',"")
+@
+
+Accession 9625 has $<10\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='9625',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'9625')
+nucleotide_count_facet(mapped_by_fq,'9625',"")
+med_qual_facet(mapped_by_fq,'9625',"")
+@
+
+Accession 6019 has $<10\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate with the exception of 6035.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='6019',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'6019')
+nucleotide_count_facet(mapped_by_fq,'6019',"6035")
+med_qual_facet(mapped_by_fq,'6019',"6035")
+@
+
+Accession 6035 has $<12\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate, with the exception of 6019 and 6073. 
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='6035',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'6035')
+nucleotide_count_facet(mapped_by_fq,'6035',c("6019","6073"))
+@
+
+Accession 5757 has $<15\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate, with the exception of 5818.  5757 has strange nucleotide distributions along the read.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='5757',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'5757')
+nucleotide_count_facet(mapped_by_fq,'5757',c("5818"))
+@
+
+Accession 6073 has $<17\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate, , with the exception of 10017, 6035.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='6073',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'6073')
+nucleotide_count_facet(mapped_by_fq,'6073',c("10017","6035"))
+@
+
+Accession 108 has $41\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='108',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'108')
+nucleotide_count_facet(mapped_by_fq,'108',"")
+@
+
+Accession 5818 has $43\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate, with the exception of 5757.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='5818',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'5818')
+nucleotide_count_facet(mapped_by_fq,'5818',c("5757"))
+@
+
+Accession 159 has $44\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='159',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'159')
+nucleotide_count_facet(mapped_by_fq,'159','')
+@
+
+Accession 2108 has $44\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate, with the exceptin of 108.  2108 nucleotide distributions are really messed up.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='2108',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'2108')
+nucleotide_count_facet(mapped_by_fq,'2108','108')
+@
+
+Accession 10017 has $50\%$ reads mapped.  The reads were from multiple lanes with low mapping rate, while other samples in the same lanes have high mapping rate, with the exceptin of 6073.
+
+<<>>=
+mapped_by_lane[tg_ecotypeid=='10017',MAPPED/(MAPPED+UNMAPPED),by="fq"]
+acc_in_lanes_with_acc(mapped_by_lane,'10017')
+nucleotide_count_facet(mapped_by_fq,'10017','6073')
+@
+
+<<>>=
+pmapped_by_lane = mapped_by_lane[,FRAC_MAPPED:=MAPPED/(MAPPED+UNMAPPED),by="fc_lane"]
+pmapped_summary = pmapped_by_lane[,list(med=median(FRAC_MAPPED),sd=sd(FRAC_MAPPED),diff=max(FRAC_MAPPED)-min(FRAC_MAPPED),min=min(FRAC_MAPPED),max=max(FRAC_MAPPED)),by="tg_ecotypeid"]
+@
+
+Accessions for which no lanes have over $70/80\%$ mapped (or maximum mapping rate is less than $70/80\%$):
+
+<<max_mapped_lt>>=
+max_lt8_acc = pmapped_summary[max<=0.8,tg_ecotypeid]
+max_lt7_acc = pmapped_summary[max<=0.7,tg_ecotypeid]
+@
+
+<<>>=
+for (acc in max_lt8_acc) {
+  acc_in_lanes_with_acc(mapped_by_lane,acc)
+}
+@
+
+\section{Filtering lanes by mapping rate}
+
+Take successive mapping rate thresholds, calculate number of mapped reads per accession and plot histogram.  There did not seem to be a big difference from thresholds 0.4 to 0.7, especially for accessions with lower number of mapped reads (less than 10 million).
+
+<<mrate_mapped>>=
+mrate_thr = c(0.0,0.4,0.5,0.6,0.7,0.8)
+
+mrate_mapped = rbindlist(alply(mrate_thr,1,function(thr) {
+  mapped_by_lane_pf = mapped_by_lane[FRAC_MAPPED>=thr,]
+  mapped_per_acc_pf = mapped_by_lane_pf[,list(MAPPED=sum(MAPPED)),by="tg_ecotypeid"]
+  cbind(FRAC_MAPPED_MIN=thr,mapped_per_acc_pf,nACC=nrow(mapped_per_acc_pf))
+}))
+
+max_nACC = max(mrate_mapped[,nACC])
+max_mapped = max(mrate_mapped[,MAPPED])
+p10a = ggplot(data=mrate_mapped,aes(x=MAPPED/1e6,color=factor(FRAC_MAPPED_MIN)))
+p10b = p10a + geom_step(aes(len=nACC,y=(1-..y..)* len),stat="ecdf",size=1,alpha=0.8)
+p10c = p10b + scale_x_continuous("Number of mapped reads (millions)",
+                                 breaks=seq(0,max_mapped/1e6,5)) +
+  scale_y_continuous("Cumulative number of accessions",
+                     breaks=seq(0,max_nACC+10,by=50)) +
+  scale_color_brewer("Min\nfraction\nmapped",palette="Dark2") +
+  theme_bw()
+print(p10c)
+@
+
+What accessions did we lose by setting 0.8 threshold?
+<<mapped_by_lane_gt8>>=
+mapped_by_lane_gt8 = mapped_by_lane[FRAC_MAPPED>=0.8,]
+gt8_acc_loss = setdiff(mapped_by_lane[,tg_ecotypeid],mapped_by_lane_gt8[,tg_ecotypeid])
+
+mapped_by_lane_gt5 = mapped_by_lane[FRAC_MAPPED>=0.5,]
+gt5_acc_loss = setdiff(mapped_by_lane[,tg_ecotypeid],mapped_by_lane_gt5[,tg_ecotypeid])
+@
+
+There seemed to be a bimodel distribution of the mapping rate among these accessions (Figure~\ref{fig:gt8_loss_acc_frac_mapped}). Accessions 6019, 6035, 6073, 9718 had no lanes with over $50\%$ mapped.  Accession 932 had one lane with low mapping rate.  Accession 2108 had mapping rates just below $50\%$.
+
+<<gt8_loss_acc_frac_mapped>>=
+p11a = ggplot(mapped_by_lane[tg_ecotypeid %in% gt8_acc_loss,],
+              aes(x=FRAC_MAPPED))
+p11b = p11a + geom_histogram() + facet_wrap(~tg_ecotypeid) +
+  geom_vline(xintercept=0.5,color="red",linetype="longdash")
+p11c = p11b + scale_x_continuous("Fraction mapped") +
+  scale_y_continuous("Number of lanes") +
+  theme_bw()
+print(p11c)
+@
+
+Examined each of these accessions manually, including checking FASTQ quality.
+
+\begin{tabular}{l >{\ttfamily\catcode`_=12 }l l l}
+\hline
+Accession & fc_lane & QC & Decision \\
+\hline
+2108 & 121019_HAL_1206_AC10P7ACXX_L006 & Low read quality after 70bp & discard \\
+& 121019_HAL_1206_AC10P7ACXX_L007 & Low read quality after 70bp & discard \\
+& 121019_HAL_1206_AC10P7ACXX_L008 & Low read quality after 70bp & discard \\
+& 121029_HAL_1207_AD1571ACXX_L008 & Low read quality after 70bp & discard \\
+5757 & 121112_HAL_1211_AD16YYACXX_L008 & Read quality scores were fine; strange nucleotide distributions and beginning kmer content & discard \\
+& 121115_JONAS_2128_BD16WKACXX_L008 & Read quality scores were fine; strange nucleotide distributions and beginning kmer content & discard \\
+& 121120_HAL_1213_AC1149ACXX_L008 & Read quality scores were fine; strange nucleotide distributions and beginning kmer content & discard \\
+& 121120_HAL_1214_BC10MGACXX_L008 & Read quality scores were fine; strange nucleotide distributions and beginning kmer content & discard \\
+6019 & 140528_HAL_1318_AC482DACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140530_HAL_1319_BC4TLFACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140603_HAL_1320_AC4TF0ACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140605_HAL_1321_BC4TMUACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141219_JONAS_2235_AC5WY1ACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141222_JONAS_2236_BC5WN6ACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141231_HAL_1361_BC5Y2MACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 150116_JONAS_2238_BC6512ACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+6035 & 140612_HAL_1323_BC4U65ACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140618_HAL_1324_AC4U6PACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140627_HAL_1327_BC4UFYACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140627_JONAS_2214_BC4U3RACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141219_JONAS_2235_AC5WY1ACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141222_JONAS_2236_BC5WN6ACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141231_HAL_1361_BC5Y2MACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\ 
+& 150116_JONAS_2238_BC6512ACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+6073 & 140612_HAL_1323_BC4U65ACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140618_HAL_1324_AC4U6PACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140627_HAL_1327_BC4UFYACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 140627_JONAS_2214_BC4U3RACXX_L001 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141219_JONAS_2235_AC5WY1ACXX_L006 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141222_JONAS_2236_BC5WN6ACXX_L006 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141231_HAL_1361_BC5Y2MACXX_L006 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 150116_JONAS_2238_BC6512ACXX_L006 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+932 & 130903_LAMARCK_3180_AD27PPACXX_L008 & Mapping rate was $78.8\%$ & keep \\
+& 130923_HAL_1275_BD2E3MACXX_L008 & Read quality scores were fine; high T and low C content; could be a methylome & discard \\
+& 131008_HAL_1279_AD2E3HACXX_L008 & Mapping rate was $78.4\%$ & keep \\
+& 131008_JONAS_2183_AC2C1HACXX_L008 & Mapping rate was $78.2\%$ & keep \\
+& 131009_JONAS_2184_BD2ET1ACXX_L008 & Mapping rate was $78.1\%$ & keep \\
+9625 & 120802_JONAS_2112_BC0R19ACXX_L008 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141219_JONAS_2235_AC5WY1ACXX_L007 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141222_JONAS_2236_BC5WN6ACXX_L007 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 141231_HAL_1361_BC5Y2MACXX_L007 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+& 150128_JONAS_2237_BC69DUACXX_L005 & Read quality scores were fine; low G content; enriched kmer at read start & discard \\
+9718 & 120802_JONAS_2112_BC0R19ACXX_L002 & Read quality scores were fine; enriched kmer at read start & discard \\
+\hline
+\end{tabular}
+
+<<gt5_loss_acc_frac_mapped>>=
+print(p11c %+% mapped_by_lane[tg_ecotypeid %in% gt5_acc_loss,])
+@
+
+Final decision was to filter out lanes with mapping rate $<=50\%$, which seemed to catch most problematic lanes.  Write the resulting list of FASTQ files to keep:
+
+<<mapped_by_fq_keep1>>=
+mapped_by_fq_keep1 = merge(mapped_by_lane_gt5,mapped_by_fq,
+                           by=c("tg_ecotypeid","fc","barcode","lane","fc_lane"),suffixes=c(".lane",".fq"))
+
+mapped_by_fq_rm1 = mapped_by_fq[!(fq %in% mapped_by_fq_keep1[,fq]),]
+
+#mapped_by_fq_keep1[,fq:=paste(tg_ecotypeid,fq,sep="_")]
+setnames(mapped_by_fq_keep1,"FRAC_MAPPED","FRAC_MAPPED.lane")
+
+write.table(mapped_by_fq_keep1,
+            paste0(rdata_prefix,'mapped_by_fq_keep1.tsv'),
+            sep='\t',row.names=FALSE,col.names=TRUE,
+            quote=FALSE)
+
+write.table(mapped_by_fq_rm1,
+            paste0(rdata_prefix,'mapped_by_fq_rm1.tsv'),
+            sep='\t',row.names=FALSE,col.names=TRUE,
+            quote=FALSE)
+@
+
+Are there any flow cells which have both kept and discard lanes?  Yes, about 23 accessions.  So cannot use the \verb|acc.bam.gene.count.matrix| file from rmake to recalculate the gene counts since this file combines all lanes in one flow cell.
+
+<<mapped50_per_fc>>=
+mapped_by_lane2 = mapped_by_lane[,mapped50:=FRAC_MAPPED>=0.5]
+mapped50_per_fc = mapped_by_lane2[,.N,by=c("tg_ecotypeid","fc","mapped50")]
+
+mapped50_per_fc_wide = reshape(mapped50_per_fc,
+                               idvar=c("tg_ecotypeid","fc"),
+                               timevar=c("mapped50"),
+                               v.names="N",
+                               direction="wide")
+mapped50_per_fc_wide[,mapped50_uniq:=rowSums(mapped50_per_fc_wide[,lapply(.SD,function(x) !is.na(x)),.SDcols=c("N.TRUE","N.FALSE","N.NA")])]
+
+print(mapped50_per_fc_wide)
+@
+
+More checking: those accessions that have mapping rate differences between lanes more than $20\%$.  Looking at a few of these seemed to suggest the low mapped lanes have been filtered by the $50\%$ mapping rate threshold.
+
+<<>>=
+print(pmapped_summary[min<=0.5 & diff>=0.4,])
+@
+
+\begin{tabular}{l >{\ttfamily\catcode`_=12 }l l l}
+\hline
+Accession & problematic fc_lane & QC & Decision \\
+\hline
+10015 & 140721_HAL_1333_AC1TN4ACXX_L001 & low read number & already discarded by mapping rate filter of $50\%$ \\
+10017 & 130320_JONAS_2151_BC1NWKACXX_L008 & Read quality scores were fine; low G content; enriched kmer at read start already discarded by mapping rate filter of $50\%$ \\
+& 130328_JONAS_2153_BD1T3NACXX_L008 & Read quality scores were fine; low G content; enriched kmer at read start already discarded by mapping rate filter of $50\%$ \\
+& 141219_JONAS_2235_AC5WY1ACXX_L006 & Read quality scores were fine; low G content; enriched kmer at read start already discarded by mapping rate filter of $50\%$ \\
+& 141222_JONAS_2236_BC5WN6ACXX_L006 & Read quality scores were fine; low G content; enriched kmer at read start already discarded by mapping rate filter of $50\%$ \\
+& 141231_HAL_1361_BC5Y2MACXX_L006 & Low read quality starting 90bp; enriched kmer at read start already discarded by mapping rate filter of $50\%$ \\
+& 150116_JONAS_2238_BC6512ACXX_L006 & Read quality scores were fine; low G content; enriched kmer at read start already discarded by mapping rate filter of $50\%$ \\
+\hline
+\end{tabular}
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

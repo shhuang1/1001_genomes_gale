@@ -1,0 +1,99 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{amsmath,array,booktabs}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(GenABEL)
+library(NMF)
+library(plyr)
+library(R.utils)
+library(reshape2)
+library(scales)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"format_methylation_2017-05-27")
+prefix.string = file.path(this_analysis_path,"graphics","format_methylation_2017-05-27-")
+rdata_prefix = file.path(this_analysis_path,"format_methylation_2017-05-27-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+#opts_chunk$set(cache.rebuild = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/format_methylation_2017-05-27-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Format accession methylation level dataset for different downstream analyses}
+\date{May 27, 2017}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item 
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+\subsection{Read data}
+
+<<read_original_data>>=
+meth.dt = fread(file.path(PROJ_DATA_PATH,'average_methylation/average_methylation_20160417.tsv'))
+setnames(meth.dt,'Sequenced by','Sequenced_by')
+@ 
+
+\subsection{Salk leaf samples}
+<<>>=
+salk_leaf.dt = meth.dt[Sequenced_by=='SALK' & Condition=='a.t.' & Tissue=='Leaf',
+                       list(accessionid=Ecotype_id,Genome_mCG,Genome_mCHG,Genome_mCHH,Genome_mC,
+                            TE_mCG,TE_mCHG,TE_mCHH,TE_mC,
+                            RdDM_mCG,RdDM_mCHG,RdDM_mCHH,RdDM_mC,
+                            CMT2_mCG,CMT2_mCHG,CMT2_mCHH,CMT2_mC,
+                            mGB_mCG)]
+
+write.table(salk_leaf.dt,file.path(PROJ_DATA_PATH,'average_methylation/average_methylation_20160417_gwa.csv'),
+            sep=',',col.names=TRUE,row.names=FALSE,quote=FALSE)
+@ 
+
+
+\section{Session Info}
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

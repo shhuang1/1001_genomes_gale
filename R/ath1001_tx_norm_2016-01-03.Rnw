@@ -1,0 +1,410 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(DESeq2)
+library(gdata)
+library(genefilter)
+library(ggplot2)
+library(plyr)
+library(RColorBrewer)
+library(R.utils)
+library(RUVSeq)
+library(S4Vectors)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+ath1001_htseq_all = file.path(PROJ_RESULTS_PATH,'ath1001_tx_htseq_count_2015-12-07','graphics','ath1001_tx_htseq_count_2015-12-07-count.txt')
+ath1001_htseq_all_chr = file.path(PROJ_RESULTS_PATH,'ath1001_tx_htseq_count_2015-12-07','graphics','ath1001_tx_htseq_count_2015-12-07-count_chr.txt')
+
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-01-03")
+prefix.string = file.path(this_analysis_path,"graphics","ath1001_tx_norm_2016-01-03-")
+rdata_prefix = file.path(this_analysis_path,"ath1001_tx_norm_2016-01-03-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/ath1001_tx_norm_2016-01-03-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome normalization}
+\date{January, 2015}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Based on testing RUV methods (RUVg and RUVs) by calling differential expression on repicates in \\ \verb|\Sexpr{ath1001_tx_norm_2015-12-20}|, the best normalization method is RUVg with 21 reference genes with k=3 or 4.
+\item Also use the criteria for non-specific filtering as in \\ \verb|\Sexpr{ath1001_tx_norm_2015-12-20}|.
+\item Run RUVg on unnormalized counts
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+
+<<load_counts>>=
+hts_count = as.matrix(read.table(ath1001_htseq_all,sep='\t',header=TRUE,row.names=1))
+gene_names = rownames(hts_count)
+ath_19acc_21ref = fread(ath_19acc_21ref_file)
+@
+
+For non-specific filtering, take a count threshold of 5 and min number of accessions to be 5\% of total number of accessions.  See \\ \verb|\Sexpr{ath1001_tx_norm_2015-12-20}|.
+
+<<min_filter>>=
+min_count = 5
+min_sample = ncol(hts_count)*0.05
+### min filter: only keep genes expressed in at least 5% samples
+filter = apply(hts_count, 1, function(x) length(x[x>=min_count])>min_sample)
+
+validQuartileSamp = apply(hts_count[filter,],2,function(x) quantile(x,p=0.75))>0
+
+hts_count2 = hts_count[filter,validQuartileSamp]
+gene_names2 = rownames(hts_count2)
+
+accx2 = colnames(hts_count2)
+acc2 = sub("X","",accx2)
+
+hts_count2_1001g = hts_count2[,intersect(acc_list_1001g[,tg_ecotypeidx],colnames(hts_count2))]
+
+if ("save_results" %in% step_list) {
+    write.table(hts_count2,paste0(rdata_prefix,'filtered01.txt'),
+
+                sep='\t',col.names=TRUE,row.names=TRUE,quote=FALSE)
+    
+    write.table(hts_count2,paste0(rdata_prefix,'filtered01.csv'),
+                quote=FALSE,sep=',',col.names=NA,row.names=TRUE)
+    
+    write.table(t(hts_count2),paste0(rdata_prefix,'filtered01T.csv'),
+                    quote=FALSE,sep=',',col.names=NA,row.names=TRUE)
+    
+    write.table(acc2,paste0(rdata_prefix,'filtered01_acc.txt'),
+                sep='\t',col.names=FALSE,row.names=FALSE,quote=FALSE)
+    
+    write.table(hts_count2_1001g,paste0(rdata_prefix,'filtered01_1001g.csv'),
+                quote=FALSE,sep=',',col.names=NA,row.names=TRUE)
+    
+    write.table(t(hts_count2_1001g),paste0(rdata_prefix,'filtered01T_1001g.csv'),
+                quote=FALSE,sep=',',col.names=NA,row.names=TRUE)    
+    
+}
+@
+
+<<RINfun>>=
+#Rank Based Inverse Normal (RIN) transformation
+#Using Rankit based on Solomon & Sawilowsky's (2009) findings.  
+#http://bisharaa.people.cofc.edu/modelcode/Code14o_public1.R
+RINfun<-function(yorig) {
+    yranks=rank(yorig)
+    tempp=(yranks-.5)/(length(yranks))
+    return(qnorm(tempp))
+}
+@ 
+
+\section{RUVg normalization based on raw counts}
+RUVg directly accepts raw counts.  The return RUVg normalized count matrix are also integer.
+
+
+<<htsMat>>=
+hts_count_design = data.frame(
+    tg_ecotypeidx=with(acc_list_1001g,{
+        tg_ecotypeidx[match(colnames(hts_count2_1001g),tg_ecotypeidx)]
+    }),
+    tg_ecotypeid=with(acc_list_1001g,{
+        tg_ecotypeid[match(colnames(hts_count2_1001g),tg_ecotypeidx)]
+    }),
+    group=with(acc_list_1001g,{
+        group[match(colnames(hts_count2_1001g),tg_ecotypeidx)]
+    })
+)
+
+htsMat = DESeqDataSetFromMatrix(countData=hts_count2_1001g,
+    colData=hts_count_design,
+    design=~group)
+htsMat = estimateSizeFactors(htsMat)
+
+if ("load_vst" %in% step_list) {
+  load(paste0(rdata_prefix,'vsd_blind.RData'))
+} else {
+  htsVsd = varianceStabilizingTransformation(htsMat,blind=TRUE)
+  htsVsd$tg_ecotypeid = hts_count_design[,'tg_ecotypeid']
+  save(htsVsd,htsMat,file=paste0(rdata_prefix,'htsVsd_blind.RData'))
+}
+
+htsVsd_mat = assay(htsVsd)
+colnames(htsVsd_mat) = as.character(colData(htsVsd)[,'tg_ecotypeidx'])
+write.table(htsVsd_mat,
+            paste0(rdata_prefix,'filtered01_1001g_vst.txt'),
+            quote=F,sep='\t')
+
+htsRow_cv = rowSds(htsVsd_mat)/rowMeans(htsVsd_mat)
+htsVsd_mat_cv1 = htsVsd_mat[htsRow_cv>0.05,]
+write.table(htsVsd_mat_cv1,
+            paste0(rdata_prefix,'filtered01_1001g_vst_cv0p05.txt'),
+            quote=F,sep='\t')
+write.table(t(htsVsd_mat_cv1),
+            paste0(rdata_prefix,'filtered01_1001g_vst_cv0p05T.csv'),
+            quote=F,sep=',',col.names=NA,row.names=TRUE)
+
+htsVsd_mat_cv1_rin1 = adply(htsVsd_mat_cv1,1,RINfun,.parallel=TRUE)
+rownames(htsVsd_mat_cv1_rin1) = htsVsd_mat_cv1_rin1[,1]
+htsVsd_mat_cv1_rin1 = as.matrix(htsVsd_mat_cv1_rin1[,2:ncol(htsVsd_mat_cv1_rin1)])
+
+write.table(t(htsVsd_mat_cv1_rin1),
+            paste0(rdata_prefix,'filtered01_1001g_vst_cv0p05_rinT.csv'),
+            quote=F,sep=',',col.names=NA,row.names=TRUE)
+@ 
+
+<<RUVg_21ref>>=
+try_k = 2:5
+
+if ("run_ruvg_21ref" %in% step_list) {
+    
+    RUVg_21ref = alply(try_k,1,function(k) {
+    
+        gNorm = RUVg(hts_count2,ath_19acc_21ref[,AGI],k=k)
+        
+        W = data.frame(gNorm$W)
+        normCounts = data.frame(gNorm$normalizedCounts)
+        W = cbind(tg_ecotypeidx=colnames(normCounts),W)
+        normCounts = cbind(gene_id=rownames(normCounts),normCounts)
+        
+        if ("save_results" %in% step_list) {
+            write.table(W,paste0(rdata_prefix,'gNorm_W_k',k,'.txt'),sep='\t',
+                        row.names=FALSE,col.names=TRUE,quote=FALSE)    
+            write.table(normCounts,paste0(rdata_prefix,'gNorm_normCounts_k',k,'.txt'),sep='\t',
+                        row.names=FALSE,col.names=TRUE,quote=FALSE)
+        }
+    
+        return(gNorm)
+    },.parallel=TRUE)
+    
+    names(RUVg_21ref) = try_k
+    if ("save_results" %in% step_list) {    
+        save(RUVg_21ref,file=paste0(rdata_prefix,'RUVg_21ref.RData'))
+    }
+} else {
+    load(paste0(rdata_prefix,'RUVg_21ref.RData'))
+}
+@ 
+
+\section{VST tranformation}
+Variance stabilizing transformation of RUVg normalized counts.
+
+<<vst_transform>>=
+gene_count_mat = RUVg_21ref[['4']]$normalizedCounts
+gene_count_mat2 = gene_count_mat[,intersect(acc_list_1001g[,tg_ecotypeidx],colnames(gene_count_mat))]
+gene_count_design = data.frame(
+    tg_ecotypeidx=with(acc_list_1001g,{
+        tg_ecotypeidx[match(colnames(gene_count_mat2),tg_ecotypeidx)]
+    }),
+    tg_ecotypeid=with(acc_list_1001g,{
+        tg_ecotypeid[match(colnames(gene_count_mat2),tg_ecotypeidx)]
+    }),
+    group=with(acc_list_1001g,{
+        group[match(colnames(gene_count_mat2),tg_ecotypeidx)]
+    })
+)
+
+ddsMat = DESeqDataSetFromMatrix(countData=gene_count_mat2,
+    colData=gene_count_design,
+    design=~group)
+ddsMat = estimateSizeFactors(ddsMat)
+deseq_ncounts = counts(ddsMat, normalized=TRUE)
+colnames(deseq_ncounts) = colData(ddsMat)$tg_ecotypeidx
+
+if ("load_vst" %in% step_list) {
+  load(paste0(rdata_prefix,'vsd_blind.RData'))
+} else {
+  vsd = varianceStabilizingTransformation(ddsMat,blind=TRUE)
+  vsd$tg_ecotypeid = gene_count_design[,'tg_ecotypeid']
+  save(vsd,ddsMat,deseq_ncounts,file=paste0(rdata_prefix,'vsd_blind.RData'))
+}
+
+vsd_mat = assay(vsd)
+colnames(vsd_mat) = as.character(colData(vsd)[,'tg_ecotypeidx'])
+
+write.table(vsd_mat,
+            paste0(rdata_prefix,'gNorm_normCounts_k4_1001g_vst.txt'),
+            quote=F,sep='\t')
+
+row_cv = rowSds(vsd_mat)/rowMeans(vsd_mat)
+vsd_mat_cv1 = vsd_mat[row_cv>0.05,]
+
+write.table(vsd_mat_cv1,
+            paste0(rdata_prefix,'gNorm_normCounts_k4_1001g_vst_cv0p05.txt'),
+            quote=F,sep='\t')
+@
+
+<<vst_transform_tryk>>=
+try_k = list('2'='2','3'='3','4'='4','5'='5')
+
+gene_count_matL = lapply(try_k,function(k) RUVg_21ref[[k]]$normalizedCounts)
+
+gene_count_mat2L = lapply(try_k,function(k) {
+    gene_count_mat = gene_count_matL[[k]]
+    gene_count_mat[,intersect(acc_list_1001g[,tg_ecotypeidx],colnames(gene_count_mat))]
+})
+
+gene_count_designL = lapply(try_k,function(k) {
+    gene_count_mat2 = gene_count_mat2L[[k]]
+    data.frame(
+        tg_ecotypeidx=with(acc_list_1001g,{
+            tg_ecotypeidx[match(colnames(gene_count_mat2),tg_ecotypeidx)]
+        }),
+        tg_ecotypeid=with(acc_list_1001g,{
+            tg_ecotypeid[match(colnames(gene_count_mat2),tg_ecotypeidx)]
+        }),
+        group=with(acc_list_1001g,{
+            group[match(colnames(gene_count_mat2),tg_ecotypeidx)]
+        })
+    )
+})
+
+ddsMatL = lapply(try_k,function(k) {
+    DESeqDataSetFromMatrix(countData=gene_count_mat2L[[k]],
+                           colData=gene_count_designL[[k]],
+                           design=~group)
+})
+
+ddsMatL = llply(ddsMatL,function(ddsMat) { estimateSizeFactors(ddsMat) },.parallel=TRUE)
+deseq_ncountsL = llply(ddsMatL,function(ddsMat) counts(ddsMat, normalized=TRUE),.parallel=TRUE)
+for (k in try_k) {
+    colnames(deseq_ncountsL[[k]]) = colData(ddsMatL[[k]])$tg_ecotypeidx
+}
+
+if ("load_vst" %in% step_list) {
+  load(paste0(rdata_prefix,'vsd_blind_list.RData'))
+} else {
+    
+  vsdL = llply(ddsMatL,function(ddsMat) { 
+      varianceStabilizingTransformation(ddsMat,blind=TRUE) 
+  },.parallel=TRUE)
+    
+  for (k in try_k) {
+      vsdL[[k]]$tg_ecotypeid = gene_count_designL[[k]][,'tg_ecotypeid']
+  }
+  
+  save(vsdL,ddsMatL,deseq_ncountsL,file=paste0(rdata_prefix,'vsd_blind_list.RData'))
+}
+
+vsd_matL = llply(vsdL,function(vsd) assay(vsd))
+
+for (k in try_k) {   
+    colnames(vsd_matL[[k]]) = as.character(colData(vsdL[[k]])[,'tg_ecotypeidx'])
+    write.table(vsd_matL[[k]],
+                paste0(rdata_prefix,sprintf('gNorm_normCounts_k%s_1001g_vst2.txt',k)),
+                quote=F,sep='\t')
+}
+    
+row_cvL = llply(vsd_matL,function(vsd_mat) rowSds(vsd_mat)/rowMeans(vsd_mat))
+vsd_mat_cv1L = llply(try_k,function(k) vsd_matL[[k]][row_cvL[[k]]>0.05,])
+
+for (k in try_k) {    
+    write.table(vsd_mat_cv1L[[k]],
+                paste0(rdata_prefix,sprintf('gNorm_normCounts_k%s_1001g_vst2_cv0p05.txt',k)),
+                quote=F,sep='\t')   
+}
+
+@ 
+
+<<rankit>>=
+vsd_mat_rin1 = adply(vsd_mat,1,RINfun,.parallel=TRUE)
+rownames(vsd_mat_rin1) = vsd_mat_rin1[,1]
+vsd_mat_rin1 = as.matrix(vsd_mat_rin1[,2:ncol(vsd_mat_rin1)])
+
+write.table(vsd_mat_rin1,
+            paste0(rdata_prefix,'gNorm_normCounts_k4_1001g_vst_rin.txt'),
+            quote=F,sep='\t')
+
+vsd_mat_cv1_rin1 = adply(vsd_mat_cv1,1,RINfun,.parallel=TRUE)
+rownames(vsd_mat_cv1_rin1) = vsd_mat_cv1_rin1[,1]
+vsd_mat_cv1_rin1 = as.matrix(vsd_mat_cv1_rin1[,2:ncol(vsd_mat_cv1_rin1)])
+
+write.table(vsd_mat_cv1_rin1,
+            paste0(rdata_prefix,'gNorm_normCounts_k4_1001g_vst_cv0p05_rin.txt'),
+            quote=F,sep='\t')
+
+write.table(vsd_mat_cv1_rin1,
+            paste0(rdata_prefix,'gNorm_normCounts_k4_1001g_vst_cv0p05_rin.csv'),
+            quote=F,sep=',',col.names=NA,row.names=TRUE)
+
+vsd_mat_cv1_rin1t = t(vsd_mat_cv1_rin1)
+write.table(vsd_mat_cv1_rin1t,
+            paste0(rdata_prefix,'gNorm_normCounts_k4_1001g_vst_cv0p05_rinT.csv'),
+            quote=F,sep=',',col.names=NA,row.names=TRUE)
+
+
+@ 
+
+<<rankit_try_k>>=
+vsd_mat_rin1L = llply(vsd_matL,function(vsd_mat) { adply(vsd_mat,1,RINfun,.parallel=TRUE) })
+
+for (k in try_k) {
+    rownames(vsd_mat_rin1L[[k]]) = vsd_mat_rin1L[[k]][,1]
+    vsd_mat_rin1L[[k]] = as.matrix(vsd_mat_rin1L[[k]][,2:ncol(vsd_mat_rin1L[[k]])])
+    write.table(vsd_mat_rin1L[[k]],
+            paste0(rdata_prefix,sprintf('gNorm_normCounts_k%s_1001g_vst2_rin.txt',k)),
+            quote=F,sep='\t')
+}
+
+vsd_mat_cv1_rin1L = llply(vsd_mat_cv1L,function(vsd_mat_cv1) {
+    adply(vsd_mat_cv1,1,RINfun,.parallel=TRUE)
+})
+
+for (k in try_k) {
+    rownames(vsd_mat_cv1_rin1L[[k]]) = vsd_mat_cv1_rin1L[[k]][,1]
+    vsd_mat_cv1_rin1L[[k]] = as.matrix(vsd_mat_cv1_rin1L[[k]][,2:ncol(vsd_mat_cv1_rin1L[[k]])])
+    
+    write.table(vsd_mat_cv1_rin1L[[k]],
+                paste0(rdata_prefix,sprintf('gNorm_normCounts_k%s_1001g_vst2_cv0p05_rin.txt',k)),
+                quote=F,sep='\t')
+    
+    write.table(vsd_mat_cv1_rin1L[[k]],
+                paste0(rdata_prefix,sprintf('gNorm_normCounts_k%s_1001g_vst2_cv0p05_rin.csv',k)),
+                quote=F,sep=',',col.names=NA,row.names=TRUE)
+}
+
+vsd_mat_cv1_rin1tL = llply(vsd_mat_cv1_rin1L,function(vsd_mat_cv1_rin1) t(vsd_mat_cv1_rin1))
+
+for (k in try_k) {
+    write.table(vsd_mat_cv1_rin1tL[[k]],
+                paste0(rdata_prefix,sprintf('gNorm_normCounts_k%s_1001g_vst2_cv0p05_rinT.csv',k)),
+                quote=F,sep=',',col.names=NA,row.names=TRUE)
+}
+@ 
+
+
+\end{document}

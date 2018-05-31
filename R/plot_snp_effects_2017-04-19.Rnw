@@ -1,0 +1,305 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(latex2exp)
+library(plyr)
+library(R.utils)
+library(RColorBrewer)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"plot_snp_effects_2017-04-19")
+prefix.string = file.path(this_analysis_path,"graphics","plot_snp_effects_2017-04-19-")
+rdata_prefix = file.path(this_analysis_path,"plot_snp_effects_2017-04-19-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/plot_snp_effects_2017-04-19-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001G SNP effects from SnpEff VCF}
+\date{April 19, 2017}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<read_snpsift>>=
+snp_ann = fread(file.path(gmi_rel_path,'1001genomes_snpeff_v3.1_extract/1001genomes_snp-short-indel_only_ACGTN_v3.1.extract-ann01.txt'))
+setnames(snp_ann,c('CHROM','POS','REF','ALT','ANN.EFFECT'))
+
+snp_ann_stat = snp_ann[,.N,by="ANN.EFFECT"]
+eff_type = rbind(data.frame(TYPE="Intergenic",
+                            ANN.EFFECT=c("intergenic_region"
+                                         )
+                            ),
+                 data.frame(TYPE="Upstream",
+                            ANN.EFFECT=c("upstream_gene_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="5' UTR",
+                            ANN.EFFECT=c("5_prime_UTR_variant",
+                                         "5_prime_UTR_premature_start_codon_gain_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="Exon",
+                            ANN.EFFECT=c("missense_variant",
+                                         "synonymous_variant", 
+                                         "frameshift_variant",
+                                         "stop_lost",
+                                         "inframe_deletion",
+                                         "non_coding_exon_variant",
+                                         "stop_gained",
+                                         "start_lost",
+                                         "inframe_insertion",
+                                         "frameshift_variant+start_lost",
+                                         "initiator_codon_variant",
+                                         "disruptive_inframe_insertion",
+                                         "disruptive_inframe_deletion",
+                                         "frameshift_variant+stop_gained",
+                                         "stop_lost+disruptive_inframe_deletion",
+                                         "frameshift_variant+stop_lost",
+                                         "start_lost+inframe_deletion",
+                                         "stop_lost+inframe_deletion",
+                                         "start_lost+inframe_insertion",
+                                         "stop_gained+inframe_insertion",
+                                         "stop_gained+disruptive_inframe_deletion",
+                                         "stop_gained+disruptive_inframe_insertion",
+                                         "start_lost+disruptive_inframe_deletion",
+                                         "stop_lost+disruptive_inframe_insertion",
+                                         "start_lost+disruptive_inframe_insertion"
+                                         )
+                            ),
+                 data.frame(TYPE="Splice donor",
+                            ANN.EFFECT=c("splice_donor_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="Intron",
+                            ANN.EFFECT=c("intron_variant"
+                                         )
+                            ),                 
+                 data.frame(TYPE="Splice acceptor",
+                            ANN.EFFECT=c("splice_acceptor_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="Splice region",
+                            ANN.EFFECT=c("splice_region_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="Intragenic",
+                            ANN.EFFECT=c("intragenic_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="Transcript",
+                            ANN.EFFECT=c("stop_retained_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="3' UTR",
+                            ANN.EFFECT=c("3_prime_UTR_variant"
+                                         )
+                            ),
+                 data.frame(TYPE="Downstream",
+                            ANN.EFFECT=c("downstream_gene_variant"
+                                         )
+                            ),
+                 stringsAsFactors=FALSE
+)
+
+snp_ann_stat = snp_ann[,.N,by="ANN.EFFECT"]
+eff_type2 = rbind(data.frame(TYPE="missense_variant",
+                             CLASS="Coding",
+                             ANN.EFFECT=c("missense_variant"
+                             )
+                             ),
+                  data.frame(TYPE="frameshift_variant",
+                             CLASS="Coding",
+                             ANN.EFFECT=c("frameshift_variant"
+                             )
+                             ),
+                  data.frame(TYPE="coding_sequence_variant",
+                             CLASS="Coding",
+                             ANN.EFFECT=c("disruptive_inframe_deletion",
+                                          "disruptive_inframe_insertion",
+                                          "inframe_deletion",
+                                          "inframe_insertion",
+                                          "initiator_codon_variant",
+                                          "start_lost",
+                                          "stop_retained_variant"
+                             )
+                             ),
+                  data.frame(TYPE="stop_gained",
+                             CLASS="Coding",
+                             ANN.EFFECT=c("stop_gained"
+                             )
+                             ),
+                  data.frame(TYPE="stop_lost",
+                             CLASS="Coding",
+                             ANN.EFFECT=c("stop_lost"
+                             )
+                             ),
+                  data.frame(TYPE="synonymous_variant",
+                             CLASS="Coding synon",
+                             ANN.EFFECT=c("synonymous_variant"
+                             )
+                             ),
+                  data.frame(TYPE="intron_variant",
+                             CLASS="Intron",
+                             ANN.EFFECT=c("intron_variant"
+                             )
+                             ),
+                  data.frame(TYPE="intergenic_variant",
+                             CLASS="Intergenic",
+                             ANN.EFFECT=c("intergenic_region"
+                             )
+                             ),
+                  data.frame(TYPE="upstream_gene_variant",
+                             CLASS="Near gene",
+                             ANN.EFFECT=c("upstream_gene_variant"
+                             )
+                             ),
+                  data.frame(TYPE="downstream_gene_variant",
+                             CLASS="Near gene",
+                             ANN.EFFECT=c("downstream_gene_variant"
+                             )
+                             ),
+                  data.frame(TYPE="3_prime_UTR_variant",
+                             CLASS="UTR",
+                             ANN.EFFECT=c("3_prime_UTR_variant"
+                             )
+                             ),
+                  data.frame(TYPE="5_prime_UTR_variant",
+                             CLASS="UTR",
+                             ANN.EFFECT=c("5_prime_UTR_premature_start_codon_gain_variant",
+                                          "5_prime_UTR_variant"
+                             )
+                             ),
+                  data.frame(TYPE="splice_region_variant",
+                             CLASS="Splice",
+                             ANN.EFFECT=c("splice_region_variant"
+                             )
+                             ),
+                  data.frame(TYPE="splice_acceptor_variant",
+                             CLASS="Splice",
+                             ANN.EFFECT=c("splice_acceptor_variant"
+                             )
+                             ),
+                  data.frame(TYPE="splice_donor_variant",
+                             CLASS="Splice",
+                             ANN.EFFECT=c("splice_donor_variant"
+                             )
+                             ),
+                  data.frame(TYPE="Multiple",
+                             CLASS="Multiple or other",
+                             ANN.EFFECT=c("frameshift_variant+start_lost",
+                                          "frameshift_variant+stop_gained",
+                                          "frameshift_variant+stop_lost",
+                                          "start_lost+disruptive_inframe_deletion",
+                                          "start_lost+disruptive_inframe_insertion",
+                                          "start_lost+inframe_deletion",
+                                          "start_lost+inframe_insertion",
+                                          "stop_gained+disruptive_inframe_deletion",
+                                          "stop_gained+disruptive_inframe_insertion",
+                                          "stop_gained+inframe_insertion",
+                                          "stop_lost+disruptive_inframe_deletion",
+                                          "stop_lost+disruptive_inframe_insertion",
+                                          "stop_lost+inframe_deletion"
+                             )
+                             ),
+                  data.frame(TYPE="regulatory_region_variant",
+                             CLASS="Regulatory",
+                             ANN.EFFECT=c("regulatory_region_variant"
+                                          )
+                             ),
+                  data.frame(TYPE="TF_binding_site_variant",
+                             CLASS="Regulatory",
+                             ANN.EFFECT=c("TF_binding_site_variant"
+                                          )
+                             ),
+                  data.frame(TYPE="Other",
+                             CLASS="Multiple or other",
+                             ANN.EFFECT=c("intragenic_variant",
+                                          "non_coding_exon_variant"
+                             )
+                             )
+                  )
+
+
+snp_ann_stat = merge(snp_ann_stat,eff_type2,by='ANN.EFFECT')
+snp_type_stat = snp_ann_stat[,sum(N),by=c("TYPE","CLASS")]
+snp_type_stat = snp_type_stat[,percent:=V1/sum(V1)]
+snp_type_stat = snp_type_stat[,TYPE:=factor(TYPE,levels=rev(unique(eff_type2[,'TYPE'])),ordered=TRUE)]
+@ 
+
+<<effect_hist>>=
+pdf(paste0(prefix.string,'effect_hist.pdf'),width=7,height=4)
+set1_9 = brewer.pal(9,'Set1')
+p1a = ggplot(data=snp_type_stat,aes(x=TYPE,y=V1/1e6,fill=CLASS)) 
+p1b = p1a + geom_bar(stat="identity") + 
+    geom_text(aes(x=TYPE,y=V1/1e6+0.01,ymin=V1,label=sprintf("%.02f%%",percent*100),hjust=0),size=4) +
+    coord_flip() + 
+    ggtitle("SNPs from 1,135 accessions in Arabidopsis 1001G project")
+p1c = p1b + scale_x_discrete("") + 
+    scale_y_continuous(TeX('Number of variants $(\\times 10^6)$'),breaks=seq(0,18,by=2),limits=c(0,17)) +
+    #scale_fill_brewer("Functional class",palette="Set1") +
+    scale_fill_manual("Functional class",values=set1_9[c(1:7,9)]) +
+    theme_bw()
+print(p1c)
+dev.off()
+
+p1a = ggplot(cont_count,aes(x=Context_out,y=N/1000,fill=factor(Context_group,levels=unique(cont_grp[,'Context_group']))))
+p1b = p1a + geom_bar(stat="identity",width=0.8) +
+        geom_text(aes(x=Context_out,y=N/1000+0.01,ymin=N,label=sprintf("%.02f%%",perc*100),hjust=0),size=4) +
+        coord_flip()
+p1c = p1b + scale_x_discrete("") +
+        scale_y_continuous(TeX('Number of variants $(\\times 10^3)$'),breaks=seq(0,16,by=2),limits=c(0,17)) +
+        scale_fill_brewer("Functional class",palette="Set1") +
+        theme_bw()
+print(p1c)
+
+@ 
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

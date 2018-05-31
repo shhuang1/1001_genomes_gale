@@ -1,0 +1,1343 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(edgeR)
+library(foreach)
+library(gdata)
+library(ggplot2)
+library(GGally)
+library(gProfileR)
+library(RColorBrewer)
+library(R.utils)
+library(NMF)
+library(plyr)
+library(scales)
+library(stringr)
+library(WGCNA)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"wgcna_analysis_2016-04-23")
+prefix.string = file.path(this_analysis_path,"graphics","wgcna_analysis_2016-04-23-")
+rdata_prefix = file.path(this_analysis_path,"wgcna_analysis_2016-04-23-")
+
+deg_lrt_list_file = file.path(PROJ_RESULTS_PATH,'acc_variable_genes_2016-04-21/acc_variable_genes_2016-04-21-lrt_list.RData')
+gNorm_normCounts_k4_cv5_file = gNorm_normCounts_k4_cv5_file2
+
+step_list = ""
+RUVg_k = '4'
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+#opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(cache.rebuild = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/wgcna_analysis_2016-04-23-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'misreg_go_heat_mf') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{WGCNA correlation networks from 1001 transcriptomes}
+\date{April 23, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Use FASTQ filtered, batch normalized, variance stabilized gene expression, filtered to genes with covariance greater than 0.05: \verb|\Sexpr{gNorm_normCounts_k4_cv5_file}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+enableWGCNAThreads(32)
+@
+
+\section{Read expression data}
+<<read_dat>>=
+datExpr0 = fread(gNorm_normCounts_k4_cv5_file)
+acc_list_1001tx_nad = acc_list_1001g[group!='admixed' & tg_ecotypeidx %in% colnames(datExpr0),]
+datExpr = t(as.matrix(datExpr0[,acc_list_1001tx_nad[,tg_ecotypeidx],with=FALSE]))
+colnames(datExpr) = datExpr0[,id]
+@ 
+
+\section{Construct co-expression networks}
+
+\subsection{Choose soft power}
+
+<<choose_beta>>=
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+@ 
+
+We chose power 4, the lowest power for which scale-free toplogy fit index curve flattens out after reaching high value of 0.90.
+
+\subsection{Calculate adjacency and connectivity}
+
+<<coexp_adj>>=
+softPower = 4;
+adjacency = adjacency(datExpr, power = softPower);
+@ 
+
+Soft-connectivity distribution seems to have a sharp drop at 2.  Filter out genes with connectivity $<=2$ and use the rest for network construction.
+
+<<ktotal>>=
+k = softConnectivity(datExpr,power=softPower)
+
+names(k) = colnames(k)
+hist(k,n=100)
+abline(v=2,col="red")
+    
+plot.ecdf(k)
+abline(v=2,col="red")
+@ 
+
+<<datExpr_kgt2>>=
+datExpr_kgt2 = datExpr[,k>2]
+@ 
+
+\subsection{Module construction for relict and non-relict groups}
+
+<<relict_genetree,fig.width=7,fig.height=3.5>>=
+# filtered to relict groups
+datExpr_rel = datExpr_kgt2[acc_list_1001tx_nad[relict=='Y',tg_ecotypeidx],]
+# calculate adjacency matrix
+adjMat_rel = adjacency(datExpr_rel,power=softPower)
+# Turn adjacency into Topological Overlap Matrix as distance
+dissGTOM_rel = TOMdist(adjMat_rel)
+
+# hierachical clustering using TOM distance
+hierGTOM_rel = hclust(as.dist(dissGTOM_rel),method="average")
+
+# plot
+#pdf(paste0(prefix.string,"aaa.pdf"),width=7,height=3.5)
+#sizeGrWindow(12,9)
+plot(hierGTOM_rel,xlab="",sub="",main="Gene clustering on TOM-based dissimilarity on relict samples",
+     labels=FALSE,hang=0.04)
+#dev.off()
+@ 
+
+<<nonrelict_genetree,fig.width=7,fig.height=3.5>>=
+# filtered to non-relict groups
+datExpr_nonrel = datExpr_kgt2[acc_list_1001tx_nad[relict!='Y',tg_ecotypeidx],]
+# calculate adjacency matrix
+adjMat_nonrel = adjacency(datExpr_nonrel,power=softPower)
+# Turn adjacency into Topological Overlap Matrix as distance
+dissGTOM_nonrel = TOMdist(adjMat_nonrel)
+
+# hierachical clustering using TOM distance
+hierGTOM_nonrel = hclust(as.dist(dissGTOM_nonrel),method="average")
+
+# plot
+#sizeGrWindow(12,9)
+#pdf(paste0(prefix.string,"aaa.pdf"),width=7,height=3.5)
+plot(hierGTOM_nonrel,xlab="",sub="",
+     main="Gene clustering on TOM-based dissimilarity on non-relict samples",
+     labels=FALSE,hang=0.04)
+#dev.off()
+@ 
+
+\subsection{Relict modules}
+
+<<relict_modules>>=
+myheightcutoff = NULL
+mydeepSplit = FALSE
+myminModuleSize = 60
+
+# module identification usng dynamic tree cut
+mod_rel = cutreeDynamic(dendro=hierGTOM_rel,distM=dissGTOM_rel,
+                          deepSplit=mydeepSplit,
+                          cutHeight=myheightcutoff,
+                          minClusterSize=myminModuleSize)
+# convert numeric labels to colors
+color_rel = labels2colors(mod_rel)
+table(color_rel)
+
+# plot dendrogram and module colors
+sizeGrWindow(8,6)
+plotDendroAndColors(hierGTOM_rel,color_rel,"Dynamic Tree Cut",
+                    dendroLabels=FALSE,hang=0.03,
+                    addGuide=TRUE,guideHang=0.05,
+                    main="Gene dendrogram and module colors for relict accessions")
+
+gene_color_rel = data.frame(mod_color=color_rel,gene_id=colnames(datExpr_rel),mod=mod_rel,
+                            stringsAsFactors=FALSE)
+gene_color_rel = within(gene_color_rel,{ mod_color2=paste0("relict.",mod_color) })
+gene_mod_rel = within(gene_color_rel,{ mod_color2=paste0("relict M",mod_rel) })
+gene_list_rel = dlply(gene_mod_rel,"mod_color2",function(df) df[,'gene_id'])
+
+# module eigengenes
+MEList_rel = moduleEigengenes(datExpr_rel, colors=mod_rel,softPower=softPower,verbose=5,excludeGrey=TRUE)
+MEs_rel = MEList_rel$eigengenes
+
+if ("save_results" %in% step_list) {    
+    write.table(gene_color_rel,paste0(rdata_prefix,'gene_color_rel.tsv'),
+                sep='\t',row.names=FALSE,col.names=TRUE,quote=FALSE)
+}
+@ 
+
+\subsection{Non-relict modules}
+
+<<nonrelict_modules>>=
+myheightcutoff = NULL
+mydeepSplit = FALSE
+myminModuleSize = 60
+
+# module identification usng dynamic tree cut
+mod_nonrel = cutreeDynamic(dendro=hierGTOM_nonrel,distM=dissGTOM_nonrel,
+                          deepSplit=mydeepSplit,
+                          cutHeight=myheightcutoff,
+                          minClusterSize=myminModuleSize)
+# convert numeric labels to colors
+color_nonrel = labels2colors(mod_nonrel)
+table(color_nonrel)
+
+# plot dendrogram and module colors
+sizeGrWindow(8,6)
+plotDendroAndColors(hierGTOM_nonrel,color_nonrel,"Dynamic Tree Cut",
+                    dendroLabels=FALSE,hang=0.03,
+                    addGuide=TRUE,guideHang=0.05,
+                    main="Gene dendrogram and module colors for non-relict accessions")
+
+gene_color_nonrel = data.frame(mod_color=color_nonrel,gene_id=colnames(datExpr_nonrel),mod=mod_nonrel,
+                               stringsAsFactors=FALSE)
+gene_color_nonrel = within(gene_color_nonrel,{ mod_color2=paste0("nonrelict.",color_nonrel) })
+gene_mod_nonrel = within(gene_color_nonrel,{ mod_color2=paste0("nonrelict M",mod_nonrel) })
+gene_list_nonrel = dlply(gene_mod_nonrel,"mod_color2",function(df) df[,'gene_id'])
+
+# module eigengenes
+MEList_nonrel = moduleEigengenes(datExpr_nonrel, colors=mod_nonrel,softPower=softPower,verbose=5,excludeGrey=TRUE)
+MEs_nonrel = MEList_nonrel$eigengenes
+
+if ("save_results" %in% step_list) {
+    
+    write.table(gene_color_nonrel,paste0(rdata_prefix,'gene_color_nonrel.tsv'),
+                sep='\t',row.names=FALSE,col.names=TRUE,quote=FALSE)
+}
+@ 
+
+\subsection{Relict modules in non-relict modules}
+
+Coloring the non-relict clusters by relict module colors, we can see that the turqoise and yellow modules are relatively conserved
+
+<<compare_mod_colors>>=
+# plot dendrogram and module colors
+sizeGrWindow(8,6)
+plotDendroAndColors(hierGTOM_nonrel,color_rel,"Dynamic Tree Cut",
+                    dendroLabels=FALSE,hang=0.03,
+                    addGuide=TRUE,guideHang=0.05,
+                    main="Gene dendrogram for non-relict accessions colored by relict modules")
+
+sizeGrWindow(8,6)
+plotDendroAndColors(hierGTOM_rel,color_nonrel,"Dynamic Tree Cut",
+                    dendroLabels=FALSE,hang=0.03,
+                    addGuide=TRUE,guideHang=0.05,
+                    main="Gene dendrogram for relict accessions colored by non-relict modules")
+
+@ 
+
+\section{Differential network analysis}
+
+\subsection{Connectivity and t-statistics in relicts and non-relicts}
+
+Calculate soft connectivity, normalize, and calculate difference between relict and non-relict groups.
+
+<<diff_k>>=
+k_rel = softConnectivity(datExpr_rel,power=softPower)
+k_nonrel = softConnectivity(datExpr_nonrel,power=softPower)
+
+K_rel = k_rel/max(k_rel)
+K_nonrel = k_nonrel/max(k_nonrel)
+
+DiffK = K_rel - K_nonrel
+
+hist(DiffK,n=100)
+@ 
+
+<<deg_stat,cache=FALSE>>=
+lrt_name = load(deg_lrt_list_file) # should be 'lrt_list'
+
+topTable_list = llply(lrt_list,function(lrt) {
+    llply(lrt,function(lrt_k) {
+        topTags(lrt_k,n=Inf,p.value=1)$table
+    })
+})
+
+topTable = topTable_list[['rvnr']][[RUVg_k]]
+llr_sgn = with(topTable[colnames(datExpr_kgt2),],{ log2(LR)*sign(logFC) })
+
+plot(DiffK,llr_sgn)
+@ 
+
+<<DiffK_vs_signedLLR>>=
+par(mfrow=c(1,2))
+plot(DiffK,llr_sgn,col=as.character(color_rel),main="Colored by relict modules")
+plot(DiffK,llr_sgn,col=as.character(color_nonrel),main="Colored by non-relict modules")
+@ 
+
+<<run_gprofiler,echo=FALSE,cache=FALSE>>=
+run_gprofiler<-function(gene_list,gene_list_name,gp_params,run_gp=TRUE) {
+  gp_output = adply(gp_params,1,function(p) {
+      output_prefix = paste0(prefix.string,gene_list_name,'_max',p[1,'max_set_size'],'_f',p[1,'hier_filtering'])
+      if (run_gp) {
+        gprofiler(gene_list,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'],
+                  png_fn=paste0(output_prefix,'.png'))
+        gp_result = gprofiler(gene_list,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'])
+        write.table(gp_result,paste0(output_prefix,'.txt'),sep="\t",row.names=F,col.names=T,quote=F)
+    }
+        data.frame(output_prefix)
+    },.parallel=T)
+ return(gp_output) 
+}
+max_user_p = 0.5
+run_gprofiler_all<-function(gene_list,gene_list_name,gp_params,run_gp=TRUE) {
+  gp_output = adply(gp_params,1,function(p) {
+      output_prefix = paste0(prefix.string,gene_list_name,'_max',p[1,'max_set_size'],'_f',p[1,'hier_filtering'],'_all')
+      print(output_prefix)
+      if (run_gp) {
+        gp_result = ldply(gene_list,function(gl) {
+          print(length(gl))
+          gprofiler(gl,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'],significant=F,max_p_value=max_user_p)
+        },.parallel=T)
+        write.table(gp_result,paste0(output_prefix,'.txt'),sep="\t",row.names=F,col.names=T,quote=F)
+    }
+        data.frame(output_prefix)
+    })
+ return(gp_output) 
+}
+@
+
+<<plot_gp_hm,echo=FALSE,cache=FALSE>>=
+plot_gp_hm<-function(group_gp_plot,motif_select_dt,orderCol,hm_file,hm_width,hm_height,...) {
+    
+  group_gp_plot0 = stats::reshape(group_gp_plot[,c('.id','term.name','p.value')],
+                           idvar='term.name',timevar='.id',v.names='p.value',
+                           direction='wide')
+    print(colnames(group_gp_plot0))
+  rownames(group_gp_plot0) = group_gp_plot0[,'term.name']
+  group_gp_plot0[,'term.name'] = NULL
+  colnames(group_gp_plot0) = gsub('p.value.','',colnames(group_gp_plot0))
+  group_gp_plot0 = NAToUnknown(group_gp_plot0,unknown=max_user_p,force=T)
+  colnames(group_gp_plot0) = sapply(colnames(group_gp_plot0),function(qn) {
+    motif_select_dt[name.exp==qn,][1,name.display]
+  })
+  if (!is.na(orderCol)) {
+      group_gp_plot0 = group_gp_plot0[,orderCol[orderCol %in% colnames(group_gp_plot0)]]
+  }
+  print(colnames(group_gp_plot0))
+  
+  postscript(file=hm_file,onefile=FALSE, width=hm_width,height=hm_height,horizontal=FALSE)
+  aheatmap(-log10(as.matrix(group_gp_plot0)),color="YlOrRd:20",scale="none",
+           Rowv=TRUE,revC=TRUE,
+           verbose=F,...)
+  dev.off()
+}
+@
+
+<<<plot_gp_hm7,echo=FALSE,cache=FALSE,cache=FALSE>>=
+# allows customized colors and breaks
+plot_gp_hm7<-function(group_gp_plot,motif_select_dt,orderCol,color,breaks,hm_file,hm_width,hm_height,...) {
+
+    group_gp_plot0 = stats::reshape(group_gp_plot[,c('.id','term.name','p.value')],
+                                    idvar='term.name',timevar='.id',v.names='p.value',
+                                    direction='wide')
+    rownames(group_gp_plot0) = group_gp_plot0[,'term.name']
+    group_gp_plot0[,'term.name'] = NULL
+    colnames(group_gp_plot0) = gsub('p.value.','',colnames(group_gp_plot0))
+    group_gp_plot0 = NAToUnknown(group_gp_plot0,unknown=max_user_p,force=T)
+    colnames(group_gp_plot0) = sapply(colnames(group_gp_plot0),function(qn) {
+        motif_select_dt[name.exp==qn,][1,name.display]
+    })
+    if (!is.na(orderCol)) {
+        group_gp_plot0 = group_gp_plot0[,orderCol[orderCol %in% colnames(group_gp_plot0)]]
+    }
+    print(colnames(group_gp_plot0))
+    
+    postscript(file=hm_file,onefile=FALSE, width=hm_width,height=hm_height,horizontal=FALSE)
+    aheatmap(-log10(as.matrix(group_gp_plot0)),color=color,breaks=breaks,
+             Rowv=TRUE,revC=TRUE,
+             verbose=F,...)
+
+    dev.off()
+}
+@
+
+
+<<mod_gp_output,echo=FALSE,results="hide">>=
+#gp_params = expand.grid(max_set_size=c(1000,1500,2000),
+#    hier_filtering=c('none','moderate','strong'))
+#gp_params = expand.grid(max_set_size=c(800),
+#    hier_filtering=c('none'))
+run_mod_gp = "run_mod_gp" %in% step_list
+
+gp_params = expand.grid(max_set_size=c(800,1000,1250,1500,2000),
+   hier_filtering=c('none'))
+
+mod_gene_lists = c(gene_list_rel,gene_list_nonrel)
+
+mod_gp_output_all = run_gprofiler_all(mod_gene_lists,'mod',gp_params,run_gp=run_mod_gp)
+@
+
+<<read_mod_gp,echo=FALSE>>=
+mod_gp = adply(mod_gp_output_all,1,function(gp) {
+  fread(paste0(gp[1,'output_prefix'],'.txt'),colClasses=c("significant"="character"))
+  },.parallel=T)
+mod_gp=ddply(mod_gp,c("max_set_size","hier_filtering",".id","domain"),
+               transform,p.value.rank=rank(p.value))
+#mod_gp[,'.id'] = gsub(' nS','',mod_gp[,'.id'])
+@
+
+<<plot_mod_gp_hm,echo=FALSE,results="hide",warning=FALSE>>=
+genelist_summary = data.table(name.exp=names(mod_gene_lists),name.display=names(mod_gene_lists))
+
+acc_top20_terms = unique(subset(mod_gp,p.value.rank<=20 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top20 = merge(acc_top20_terms,mod_gp)
+acc_top15_terms = unique(subset(mod_gp,p.value.rank<=15 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top15 = merge(acc_top15_terms,mod_gp)
+acc_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(acc_top10_terms,mod_gp)
+
+d_ply(mod_gp_top20,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top20_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4.8
+             )
+})
+
+d_ply(mod_gp_top15,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top15_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4.8
+             )
+})
+
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr7>>=
+genelist_summary_subr7 = genelist_summary[match(c('relict M7','nonrelict M8'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr7[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr7[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr7.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr7,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,2.8,2.8,
+                Colv=NA,treeheight=10
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr78>>=
+genelist_summary_subr78 = genelist_summary[match(c('relict M7','relict M8','nonrelict M8'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr78[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr78[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr78.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr78,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,3.3,2.4,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr1>>=
+genelist_summary_subr1 = genelist_summary[match(c('relict M1','nonrelict M3','nonrelict M2'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr1[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr1[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr1.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr1,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,2.9,2.4,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr8>>=
+genelist_summary_subr8 = genelist_summary[match(c('relict M8','nonrelict M8'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr8[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr8[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr8.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr8,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,3,2.4,
+                Colv=NA,treeheight=10
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr2>>=
+genelist_summary_subr2 = genelist_summary[match(c('relict M2','nonrelict M1','nonrelict M7'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr2[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr2[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr2.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr2,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,3.1,3.1,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr3>>=
+genelist_summary_subr3 = genelist_summary[match(c('relict M3','nonrelict M6'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr3[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr3[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr3.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr3,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,2.7,1.9,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1,hclustfun="complete"
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr123>>=
+genelist_summary_subr123 = genelist_summary[match(c('relict M1','nonrelict M2','nonrelict M3',
+                                                    'relict M2','nonrelict M1','nonrelict M7',
+                                                    'relict M3','nonrelict M6'),
+                                                  genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr123[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr123[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr123.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr123,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,4,4.7,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1,hclustfun="ward.D2"
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr123_2>>=
+genelist_summary_subr123_2 = genelist_summary[match(c('relict M1','relict M2','relict M3',
+                                                      'nonrelict M2','nonrelict M3','nonrelict M7',
+                                                      'nonrelict M6'),
+                                                  genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr123_2[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr123_2[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr123_2.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr123_2,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,4,4.4,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr4>>=
+genelist_summary_subr4 = genelist_summary[match(c('relict M4','nonrelict M4'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr4[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr4[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr4.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr4,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,2.8,1.9,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr5>>=
+genelist_summary_subr5 = genelist_summary[match(c('relict M5','nonrelict M5'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr5[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr5[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr5.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr5,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,2.6,2.6,
+                Colv=NA,treeheight=10
+             )
+})
+@
+
+<<plot_mod_gp_hm_subr45>>=
+genelist_summary_subr45 = genelist_summary[match(c('relict M4','nonrelict M4','relict M5','nonrelict M5'),genelist_summary[,name.exp])]
+
+mod_top10_terms = unique(subset(mod_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP") & .id %in% genelist_summary_subr45[,name.exp])[,c('max_set_size','hier_filtering','term.id')])
+mod_gp_top10 = merge(mod_top10_terms,mod_gp)
+ 
+d_ply(mod_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+    orderCol = as.character(genelist_summary_subr45[,name.display])
+    breaks = c(0,quantile(-log10(subset(x,significant==T)[,'p.value']),
+                          probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+    eps_file = paste0(prefix.string,'mod_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'_subr45.eps')
+    print(eps_file)
+    plot_gp_hm7(x,genelist_summary_subr45,orderCol=orderCol,
+                color="YlOrRd:5",breaks=breaks,
+                eps_file,3,2.2,
+                Colv=NA,cellwidth=5,cellheight=5,treeheight=10,
+                fontsize=5,cexRow=1,cexCol=1
+             )
+})
+@
+
+
+\section{Compare relict and non-relict modules}
+
+<<rel_nonrel_mod_hm,fig.width=5.5,fig.height=4.5,cache=FALSE>>=
+MEO_rel = orderMEs(MEs_rel,greyName="MEO")
+MEO_nonrel = orderMEs(MEs_nonrel,greyName="MEO")
+
+relModuleAnnot = unique(gene_mod_rel[,c("mod","mod_color","mod_color2")])
+relModuleAnnot = relModuleAnnot[match(substring(names(MEO_rel),3),relModuleAnnot[,'mod']),]
+
+nonrelModuleAnnot = unique(gene_mod_nonrel[,c("mod","mod_color","mod_color2")])
+nonrelModuleAnnot = nonrelModuleAnnot[match(substring(names(MEO_nonrel),3),nonrelModuleAnnot[,'mod']),]
+
+# number of modules
+nRelMods = nrow(relModuleAnnot)
+nNonRelMods = nrow(nonrelModuleAnnot)
+
+# Initialize tables of p-values and of the corresponding counts
+pTable = matrix(0, nrow = nRelMods, ncol = nNonRelMods);
+CountTbl = matrix(0, nrow = nRelMods, ncol = nNonRelMods);
+
+# Execute all pairwaise comparisons
+for (rmodi in 1:nRelMods) {
+    for (nrmodi in 1:nNonRelMods) {
+        rmod = relModuleAnnot[rmodi,'mod']
+        relMembers = (mod_rel == rmod);
+        nrmod = nonrelModuleAnnot[nrmodi,'mod']
+        nonrelMembers = (mod_nonrel == nrmod);
+        pTable[rmodi, nrmodi] = -log10(fisher.test(relMembers, nonrelMembers, alternative = "greater")$p.value);
+        CountTbl[rmodi, nrmodi] = sum(mod_rel == rmod & mod_nonrel == nrmod)
+    }
+}
+
+# Truncate p values smaller than 10^{-50} to 10^{-50}
+pTable[is.infinite(pTable)] = 1.3*max(pTable[is.finite(pTable)]);
+pTable[pTable>50 ] = 50 ;
+# Marginal counts (really module sizes)
+relModTotals = apply(CountTbl, 1, sum)
+nonrelModTotals = apply(CountTbl, 2, sum)
+# Actual plotting
+#sizeGrWindow(10,7 );
+
+#pdf(file=paste0(prefix.string,'rel_nonrel_mod_hm.pdf'),wi=6,he=5);
+par(mfrow=c(1,1));
+par(cex = 1.0);
+par(mar=c(8, 10.4, 2.7, 1)+0.3);
+# Use function labeledHeatmap to produce the color-coded table with all the trimmings
+labeledHeatmap(Matrix = pTable,
+               #xLabels = paste0("ME",nonrelModuleAnnot[,'mod_color']),
+               #yLabels = paste0("ME",relModuleAnnot[,'mod_color']),
+               colorLabels = FALSE,
+               xLabels = paste(nonrelModuleAnnot[,'mod_color2'], " (",nonrelModTotals,")",sep=""),
+               yLabels = paste(relModuleAnnot[,'mod_color2']," (", relModTotals, ")",sep=""),
+               textMatrix = CountTbl,
+               colors = blueWhiteRed(100)[50:100],
+               main = "Module overlap heatmap",
+               cex.text = 1.0, cex.lab.x=1,cex.lab.y=1, setStdMargins = FALSE);
+#dev.off()
+@ 
+
+<<dap_mod_enrich>>=
+dap_pf5_target0 = fread(dap_pf5_target_file)
+dap_pf5_target = dap_pf5_target0[dna.source.unified=='col',]
+
+dap_pf4_summary = fread(dap_pf4_summary_file)
+
+# Initialize tables of p-values and of the corresponding counts
+tf_ids = unique(dap_pf5_target[,tf.at_id])
+nTF = length(tf_ids)
+nMod = length(mod_gene_lists)
+pTable = matrix(0, nrow = nTF, ncol = nMod);
+CountTbl = matrix(0, nrow = nTF, ncol = nMod);
+
+# Execute all pairwaise comparisons
+foreach (tf_i=1:nTF) %do% {
+    tf = tf_ids[tf_i]
+    tf_target = dap_pf5_target[tf.at_id==tf,]
+    for (mod_i in 1:nMod) {
+        total_genes = colnames(datExpr_kgt2)
+        targetMembers = total_genes %in% tf_target[,target.at_id]
+        modMembers = total_genes %in% mod_gene_lists[[mod_i]]
+        fisher = fisher.test(targetMembers, modMembers, alternative = "greater")
+        pTable[tf_i, mod_i] = -log10(fisher$p.value)
+#        cat(length(total_genes),sum(targetMembers),sum(modMembers),sum(targetMembers & modMembers),fisher$p.value,'\n')
+        CountTbl[tf_i, mod_i] = sum(targetMembers & modMembers)
+    }
+}
+
+
+# Truncate p values smaller than 10^{-50} to 10^{-50}
+pTable[is.infinite(pTable)] = 1.3*max(pTable[is.finite(pTable)]);
+pTable[pTable>50 ] = 50 ;
+# Marginal counts (really module sizes)
+tfTotals = apply(CountTbl, 1, sum)
+modTotals = apply(CountTbl, 2, sum)
+# Actual plotting
+sizeGrWindow(10,7 );
+#pdf(file = "Plots/ConsensusVsFemaleModules.pdf", wi = 10, he = 7);
+par(mfrow=c(1,1));
+par(cex = 1.0);
+par(mar=c(8, 10.4, 2.7, 1)+0.3);
+# Use function labeledHeatmap to produce the color-coded table with all the trimmings
+labeledHeatmap(Matrix = pTable,
+#               xLabels = paste(" ", nonrelModuleLabels),
+#               yLabels = paste(" ", relModuleLabels),
+               colorLabels = TRUE,
+#               xLabels = paste("Non-relict ", nonrelModuleLabels, ": ", nonrelModTotals, sep=""),
+#               yLabels = paste("Relict ", relModuleLabels, ": ", relModTotals, sep=""),
+               textMatrix = CountTbl,
+               colors = blueWhiteRed(100)[50:100],
+               main = "Correspondence of relict specific and non-relict specific modules",
+               cex.text = 1.0, cex.lab = 1.0, setStdMargins = FALSE);
+
+#aheatmap(pTable[,1:5],Colv=NA,Rowv=NA)
+@ 
+
+<<dap_mod_enrich2,fig.width=2.2,fig.height=4>>=
+paired8 = brewer.pal(8,"Paired")
+dap_pf5_target0 = fread(dap_pf5_target_file)
+dap_pf5_target = dap_pf5_target0[dna.source.unified=='col',]
+
+dap_mod_enrich = ddply(dap_pf5_target0,"tf.at_id",function(tf_target) {
+    ldply(mod_gene_lists,function(mod_gl) {
+        total_genes = colnames(datExpr_kgt2)
+        targetMembers = total_genes %in% tf_target[,"target.at_id"]
+        modMembers = total_genes %in% mod_gl
+        fisher = fisher.test(targetMembers, modMembers, alternative = "greater")
+        data.frame(fisher.p=fisher$p.value,count=sum(targetMembers,modMembers))
+    },.id="mod")
+},.parallel=TRUE)
+
+dap_mod_enrich = within(dap_mod_enrich,{
+    fisher.p.adj = p.adjust(fisher.p,method="bonferroni")
+    minus.log10.p = -log10(fisher.p.adj)    
+})
+
+dap_mod_enrich = ddply(dap_mod_enrich,"mod",transform,
+    minus.log10.p.rank = rank(-minus.log10.p))
+
+top5_tf = unique(subset(dap_mod_enrich,minus.log10.p>=3)[,'tf.at_id'])
+dap_mod_enrich_top5 = subset(dap_mod_enrich,tf.at_id %in% top5_tf)
+
+dap_mod_enrich_top5w = reshape(dap_mod_enrich_top5[,c("tf.at_id","mod","minus.log10.p")],
+                              idvar="tf.at_id",timevar="mod",v.names="minus.log10.p",
+                              direction="wide")
+dap_mod_enrich_top5wm = as.matrix(dap_mod_enrich_top5w[,2:ncol(dap_mod_enrich_top5w)])
+#dap_mod_enrich_top5wm = dap_mod_enrich_top5wm[,colSums(dap_mod_enrich_top5wm>=3)>=1]
+
+rownames(dap_mod_enrich_top5wm) = dap_pf4_summary[match(dap_mod_enrich_top5w[,'tf.at_id'],at_id),paste0(protein,"(",family.display,")")]
+colnames(dap_mod_enrich_top5wm) = sub("minus.log10.p.","",colnames(dap_mod_enrich_top5wm))
+mod_names = sub("\\."," ",colnames(dap_mod_enrich_top5wm))
+
+dap_mod_enrich_top5val = as.vector(dap_mod_enrich_top5wm)
+breaks = c(0,quantile(dap_mod_enrich_top5val[dap_mod_enrich_top5val>0],probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+rel_color_map = list('is_relict'=c('relict'=paired8[4],'nonrelict'=paired8[3]))
+moduleAnnot = rbind(cbind("is_relict"="relict",relModuleAnnot),cbind("is_relict"="nonrelict",nonrelModuleAnnot))
+
+#pdf(paste0(prefix.string,"dap_mod_enrich2.pdf"),width=2.2,height=4)
+#aheatmap_layout(layout = "dmal")
+aheatmap(dap_mod_enrich_top5wm,col="Reds:5",breaks=breaks,treeheight=10,hclustfun="complete",
+         annCol=rel_side_annot,annColors=rel_color_map,layout="|dlamL")
+#dev.off()
+@
+
+<<dap_mod_enrich_hm>>=
+dap_mod_enrich_hm<-function(dap_mod_enrich,mod_subset,min_log10_p,rel_side_annot,rel_color_map,...) {
+    
+    top5_tf = unique(subset(dap_mod_enrich,minus.log10.p>=min_log10_p & mod %in% mod_subset)[,'tf.at_id'])
+    dap_mod_enrich_top5 = subset(dap_mod_enrich,tf.at_id %in% top5_tf)
+    
+    dap_mod_enrich_top5w = reshape(dap_mod_enrich_top5[,c("tf.at_id","mod","minus.log10.p")],
+                                   idvar="tf.at_id",timevar="mod",v.names="minus.log10.p",
+                                   direction="wide")
+    print(dim(dap_mod_enrich_top5w))
+    dap_mod_enrich_top5wm = as.matrix(dap_mod_enrich_top5w[,2:ncol(dap_mod_enrich_top5w)])
+    print(dim(dap_mod_enrich_top5wm))
+
+    rownames(dap_mod_enrich_top5wm) = dap_pf4_summary[match(dap_mod_enrich_top5w[,'tf.at_id'],at_id),paste0(protein," (",family.display,")")]
+    colnames(dap_mod_enrich_top5wm) = sub("minus.log10.p.","",colnames(dap_mod_enrich_top5wm))
+    mod_names = sub("\\."," ",colnames(dap_mod_enrich_top5wm))
+
+    dap_mod_enrich_top5val = as.vector(dap_mod_enrich_top5wm)
+    breaks = c(0,quantile(dap_mod_enrich_top5val[dap_mod_enrich_top5val>0],probs=c(0,1/4,1/2,3/4,1))+c(-.Machine$double.eps,0,0,0,.Machine$double.eps))
+
+    aheatmap(dap_mod_enrich_top5wm[,mod_subset],col="Reds:5",breaks=breaks,
+             annCol=rel_side_annot,annColors=rel_color_map,...)
+}
+
+@ 
+
+<<dap_mod_enrich3,fig.width=4.7,fig.height=8>>=
+dap_enrich_modselect = c('relict M4','nonrelict M4','relict M5','nonrelict M5',
+                         'relict M2','nonrelict M1','nonrelict M7',
+                         'relict M3','nonrelict M6',
+                         'relict M7','relict M8','nonrelict M8',
+                         'relict M1','nonrelict M2','nonrelict M3',
+                         'relict M6')
+
+mod_func_cmp = rbind(data.frame(fun_cmp="split",mod=c('relict M1','nonrelict M2','nonrelict M3')),
+                     data.frame(fun_cmp='conserved',mod=c('relict M4','nonrelict M4','relict M5','nonrelict M5')),
+                     data.frame(fun_cmp='conserved & gained',mod=c('relict M2','nonrelict M1','nonrelict M7')),
+                     data.frame(fun_cmp='changed',mod=c('relict M3','nonrelict M6')))
+                                
+set2 = brewer.pal(8,"Set2")
+func_color_map = set2[c(2,3,4,6)]
+names(func_color_map) = c('split','conserved','conserved & gained','changed')
+
+rel_side_annot = data.frame('is_relict'=moduleAnnot[match(sub("\\."," ",dap_enrich_modselect),moduleAnnot[,'mod_color2']),c('is_relict')])
+rownames(rel_side_annot) = dap_enrich_modselect
+rel_side_annot = within(rel_side_annot,{
+    fun_cmp = mod_func_cmp[match(dap_enrich_modselect,mod_func_cmp[,'mod']),'fun_cmp']
+})
+rel_color_map2 = c(list('fun_cmp'=func_color_map),rel_color_map)
+
+pdf(paste0(prefix.string,'dap_mod_enrich3.pdf'),width=4.7,height=8)
+dap_mod_enrich_hm(dap_mod_enrich,dap_enrich_modselect,4,
+                  data.frame(is_relict=rel_side_annot[dap_enrich_modselect,"is_relict"]),
+                  rel_color_map2,Colv=NA,cellheight=5,cellwidth=5,
+                  fontsize=5,cexRow=1,cexCol=1,
+                  treeheight=10,hclustfun="ward.D",layout=".L|dmal")
+dev.off()
+
+#pdf(paste0(prefix.string,'dap_mod_enrich3.pdf'),width=6,height=8)
+#aheatmap(dap_mod_enrich_top5wm[,dap_enrich_modselect],col="Reds:5",breaks=breaks,
+#         treeheight=10,Colv=NA,hclustfun="complete",
+#         annCol=rel_side_annot,annColors=rel_color_map,layout="dmal",
+#         cellheight=5,cellwidth=5)
+#dev.off()
+@
+
+<<dap_mod_enrich3_r45,fig.width=4.7,fig.height=5>>=
+dap_enrich_modselect_r45 = c('relict M4','nonrelict M4','relict M5','nonrelict M5')
+
+pdf(paste0(prefix.string,'dap_mod_enrich3_r45.pdf'),width=3.6,height=4.5)
+dap_mod_enrich_hm(dap_mod_enrich,dap_enrich_modselect_r45,4,
+                  data.frame(is_relict=rel_side_annot[dap_enrich_modselect_r45,"is_relict"]),
+                  rel_color_map2,Colv=NA,cellheight=5,cellwidth=5,
+                  fontsize=5,cexRow=1,cexCol=1,
+                  treeheight=10,hclustfun="mcquitty",layout=".L|dmal")
+dev.off()
+@ 
+
+<<dap_mod_enrich3_r123,fig.width=4.7,fig.height=8>>=
+dap_enrich_modselect_r123 = c('relict M1','nonrelict M2','nonrelict M3',
+                              'relict M2','nonrelict M1','nonrelict M7',
+                              'relict M3','nonrelict M6')
+
+pdf(paste0(prefix.string,'dap_mod_enrich3_r123.pdf'),width=3.6,height=4)
+dap_mod_enrich_hm(dap_mod_enrich,dap_enrich_modselect_r123,4,
+                  data.frame(is_relict=rel_side_annot[dap_enrich_modselect_r123,"is_relict"]),
+                  rel_color_map2,Colv=NA,cellheight=5,cellwidth=5,
+                  fontsize=5,cexRow=1,cexCol=1,
+                  treeheight=10,hclustfun="ward.D2",layout=".L|dmal")
+dev.off()
+@ 
+
+% network by TF family
+<<dap_mod_enrich_fam2>>=
+dap_mod_enrich_annot = merge(dap_mod_enrich,unique(dap_pf4_summary[,list(at_id,family,protein)]),
+                             by.x="tf.at_id",by.y="at_id")
+
+dap_mod_enrich_fam = ddply(dap_mod_enrich_annot,c("mod","family"), function(df) {
+    df[which.max(df$minus.log10.p),]
+})
+
+dap_mod_enrich_fam2 = subset(dap_mod_enrich_fam,fisher.p.adj<=0.05)
+
+modsplit = str_split_fixed(dap_mod_enrich_fam2[,'mod']," ",2)
+dap_mod_enrich_fam2 = within(dap_mod_enrich_fam2,{
+                             modsplit.1=modsplit[,1]
+                             modsplit.2=modsplit[,2]
+                             interaction="pd"
+                             display.name=paste0(protein," (",family,")")
+})
+
+write.table(subset(dap_mod_enrich_fam2,modsplit.1=='relict'),
+            paste0(rdata_prefix,'dap_modrel_enrich_fam.txt'),
+            sep='\t',row.names=FALSE,col.names=TRUE,quote=FALSE)
+
+dap_modrel_enrich_fam_noa = with(subset(dap_mod_enrich_fam2,modsplit.1=='relict'),
+                                 rbind(cbind(node_name=modsplit.2,node_type="module"),
+                                       cbind(node_name=family,node_type="tf_family")))
+write.table(dap_modrel_enrich_fam_noa,
+            paste0(rdata_prefix,'dap_modrel_enrich_fam.noa'),
+            sep='\t',row.names=FALSE,col.names=TRUE,quote=FALSE)
+
+
+write.table(subset(dap_mod_enrich_fam2,modsplit.1=='nonrelict'),
+            paste0(rdata_prefix,'dap_modnonrel_enrich_fam.txt'),
+            sep='\t',row.names=FALSE,col.names=TRUE,quote=FALSE)
+
+dap_modnonrel_enrich_fam_noa = with(subset(dap_mod_enrich_fam2,modsplit.1=='nonrelict'),
+                                    rbind(cbind(node_name=modsplit.2,node_type="module"),
+                                          cbind(node_name=family,node_type="tf_family")))
+write.table(dap_modnonrel_enrich_fam_noa,
+            paste0(rdata_prefix,'dap_modnonrel_enrich_fam.noa.txt'),
+            sep='\t',row.names=FALSE,col.names=TRUE,quote=FALSE)
+
+@ 
+
+\section{Associate modules to phenotypes}
+
+<<read_phenotype>>=
+atwell_pheno = read.table(atwell_phenotype_file,sep='\t',header=TRUE,stringsAsFactors=FALSE)
+atwell_pheno = within(atwell_pheno,{ tg_ecotypeidx=paste0("X",ecotype.id) })
+@ 
+
+Number of common accessions between relict and phenotype data:
+<<rel_pheno_intersect>>=
+intersect(rownames(datExpr_rel),atwell_pheno[,'tg_ecotypeidx'])
+@ 
+
+Number of common accessions between non-relict and phenotype data:
+<<nonrel_pheno_intersect>>=
+nonrel_pheno_acc = intersect(rownames(datExpr_nonrel),atwell_pheno[,'tg_ecotypeidx'])
+print(length(nonrel_pheno_acc))
+@ 
+
+<<moduleTraitCor_nonrel,fig.width=4,fig.height=16>>=
+# subset to intersecting accessions
+MEO_nonrel_sub1 = MEO_nonrel[match(nonrel_pheno_acc,rownames(datExpr_nonrel)),]
+datTrait0_nonrel = atwell_pheno[match(nonrel_pheno_acc,atwell_pheno[,'tg_ecotypeidx']),]
+datTrait_nonrel = datTrait0_nonrel[,3:(ncol(datTrait0_nonrel)-1)]
+rownames(datTrait_nonrel) = nonrel_pheno_acc
+
+moduleTraitCor_nonrel = cor(MEO_nonrel_sub1,datTrait_nonrel,use="p")
+moduleTraitPVal_nonrel = corPvalueStudent(moduleTraitCor_nonrel,length(nonrel_pheno_acc))
+
+#sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor_nonrel, 2), "\n(",
+                   signif(moduleTraitPVal_nonrel, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor_nonrel)
+
+#pdf(paste0(prefix.string,"aaa.pdf"),width=4,height=16)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = t(moduleTraitCor_nonrel),
+               yLabels = names(datTrait_nonrel),
+               xLabels = names(MEO_nonrel_sub1),
+               xSymbols = names(MEO_nonrel_sub1),
+               colorLabels = FALSE,
+               colors = greenWhiteRed(50),
+               textMatrix = t(textMatrix),
+               setStdMargins = FALSE,
+               cex.text = 0.3,
+               cex.lab.x = 0.3,
+               cex.lab.y = 0.4,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships\nfor non-relict accessions"))
+#dev.off()
+@ 
+
+<<moduleTraitCor_nonrel_ft,fig.width=3.3,fig.height=4.3>>=
+ft_cols = c('X1_LD','X2_LDV','X3_SD','X4_SDV','X5_FT10','X6_FT16',
+            'X7_FT22','X39_0W','X40_2W','X41_4W','X42_8W','X43_FLC',
+            'X44_FRI','X80_LN10','X81_LN16','X82_LN22')
+MEO_nonrel_sub1 = MEO_nonrel[match(nonrel_pheno_acc,rownames(datExpr_nonrel)),]
+datTrait0_nonrel = atwell_pheno[match(nonrel_pheno_acc,atwell_pheno[,'tg_ecotypeidx']),]
+datTrait_nonrel = log2(datTrait0_nonrel[,ft_cols])
+rownames(datTrait_nonrel) = nonrel_pheno_acc
+
+moduleTraitCor_nonrel = cor(MEO_nonrel_sub1,datTrait_nonrel,use="p")
+moduleTraitPVal_nonrel = corPvalueStudent(moduleTraitCor_nonrel,length(nonrel_pheno_acc))
+
+#sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor_nonrel, 2), "\n(",
+                   signif(moduleTraitPVal_nonrel, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor_nonrel)
+
+pdf(paste0(prefix.string,"moduleTraitCor_nonrel_ft.pdf"),width=3.3,height=4.3)
+#par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = t(moduleTraitCor_nonrel),
+               yLabels = sapply(strsplit(names(datTrait_nonrel),'_'),`[`,2),
+               xLabels = names(MEO_nonrel_sub1),
+#               xLabelsAngle = 0,
+#               xLabelsAdj = 0.5,
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = t(textMatrix),
+               setStdMargins = FALSE,
+               cex.text = 0.4,
+               cex.lab.x = 0.7,
+               cex.lab.y = 0.7,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships,\nflowering time traits,\nnon-relict accessions"))
+dev.off()
+@ 
+
+\section{Hypo vs other accessions}
+
+
+<<hypoT_genetree,fig.width=7,fig.height=3.5>>=
+# hypo- and hyper-methylated accessions from Rosa's first growth batch (see Joe's email April 28, 2016 8:21am; April 27, 2016 12:51pm)
+hypo = avgm[Tissue=='Leaf' & Sequenced_By=='SALK' & CMT2_mCHH<0.1 & RdDM_mCHH<0.1,tg_ecotypeidx]
+rbatch1_hypo = salk_mc_rosa_batch1[,list(tg_ecotypeidx=tg_ecotypeidx,hypo=tg_ecotypeidx %in% hypo)]
+
+# filtered to hypo-methylated accessions
+datExpr_hypoT = datExpr_kgt2[intersect(rownames(datExpr_kgt2),rbatch1_hypo[hypo==TRUE,tg_ecotypeidx]),]
+# calculate adjacency matrix
+adjMat_hypoT = adjacency(datExpr_hypoT,power=softPower)
+# Turn adjacency into Topological Overlap Matrix as distance
+dissGTOM_hypoT = TOMdist(adjMat_hypoT)
+
+# hierachical clustering using TOM distance
+hierGTOM_hypoT = hclust(as.dist(dissGTOM_hypoT),method="average")
+
+# plot
+#pdf(paste0(prefix.string,"aaa.pdf"),width=7,height=3.5)
+#sizeGrWindow(12,9)
+plot(hierGTOM_hypoT,xlab="",sub="",main="Gene clustering on TOM-based dissimilarity on hypomethylated, batch 1 samples",
+     labels=FALSE,hang=0.04)
+#dev.off()
+@ 
+
+<<hypoF_genetree,fig.width=7,fig.height=3.5>>=
+# filtered to non-hypomethylated accessions
+datExpr_hypoF = datExpr_kgt2[intersect(rownames(datExpr_kgt2),rbatch1_hypo[hypo==FALSE,tg_ecotypeidx]),]
+# calculate adjacency matrix
+adjMat_hypoF = adjacency(datExpr_hypoF,power=softPower)
+# Turn adjacency into Topological Overlap Matrix as distance
+dissGTOM_hypoF = TOMdist(adjMat_hypoF)
+
+# hierachical clustering using TOM distance
+hierGTOM_hypoF = hclust(as.dist(dissGTOM_hypoF),method="average")
+
+# plot
+#sizeGrWindow(12,9)
+#pdf(paste0(prefix.string,"aaa.pdf"),width=7,height=3.5)
+plot(hierGTOM_hypoF,xlab="",sub="",
+     main="Gene clustering on TOM-based dissimilarity on non-relict samples",
+     labels=FALSE,hang=0.04)
+#dev.off()
+@ 
+
+\subsection{Hypomethylated modules}
+
+<<hypoT_modules>>=
+myheightcutoff = NULL
+mydeepSplit = FALSE
+myminModuleSize = 60
+
+# module identification usng dynamic tree cut
+mod_hypoT = cutreeDynamic(dendro=hierGTOM_hypoT,distM=dissGTOM_hypoT,
+                          deepSplit=mydeepSplit,
+                          cutHeight=myheightcutoff,
+                          minClusterSize=myminModuleSize)
+# convert numeric labels to colors
+color_hypoT = labels2colors(mod_hypoT)
+table(color_hypoT)
+
+# plot dendrogram and module colors
+sizeGrWindow(8,6)
+plotDendroAndColors(hierGTOM_hypoT,color_hypoT,"Dynamic Tree Cut",
+                    dendroLabels=FALSE,hang=0.03,
+                    addGuide=TRUE,guideHang=0.05,
+                    main="Gene dendrogram and module colors for hypomethylated accessions")
+
+gene_color_hypoT = data.frame(mod_color=color_hypoT,gene_id=colnames(datExpr_hypoT),mod=mod_hypoT,
+                            stringsAsFactors=FALSE)
+gene_color_hypoT = within(gene_color_hypoT,{ mod_color2=paste0("hypoT.",mod_color) })
+gene_mod_hypoT = within(gene_color_hypoT,{ mod_color2=paste0("hypoT M",mod_hypoT) })
+gene_list_hypoT = dlply(gene_mod_hypoT,"mod_color2",function(df) df[,'gene_id'])
+
+# module eigengenes
+MEList_hypoT = moduleEigengenes(datExpr_hypoT, colors=mod_hypoT,softPower=softPower,verbose=5,excludeGrey=TRUE)
+MEs_hypoT = MEList_hypoT$eigengenes
+@ 
+
+\subsection{Non-hypomethylated modules}
+
+<<hypoF_modules>>=
+myheightcutoff = NULL
+mydeepSplit = FALSE
+myminModuleSize = 60
+
+# module identification usng dynamic tree cut
+mod_hypoF = cutreeDynamic(dendro=hierGTOM_hypoF,distM=dissGTOM_hypoF,
+                          deepSplit=mydeepSplit,
+                          cutHeight=myheightcutoff,
+                          minClusterSize=myminModuleSize)
+# convert numeric labels to colors
+color_hypoF = labels2colors(mod_hypoF)
+table(color_hypoF)
+
+# plot dendrogram and module colors
+sizeGrWindow(8,6)
+plotDendroAndColors(hierGTOM_hypoF,color_hypoF,"Dynamic Tree Cut",
+                    dendroLabels=FALSE,hang=0.03,
+                    addGuide=TRUE,guideHang=0.05,
+                    main="Gene dendrogram and module colors for non-hypomethylated accessions")
+
+gene_color_hypoF = data.frame(mod_color=color_hypoF,gene_id=colnames(datExpr_hypoF),mod=mod_hypoF,
+                               stringsAsFactors=FALSE)
+gene_color_hypoF = within(gene_color_hypoF,{ mod_color2=paste0("hypoF.",color_hypoF) })
+gene_mod_hypoF = within(gene_color_hypoF,{ mod_color2=paste0("hypoF M",mod_hypoF) })
+gene_list_hypoF = dlply(gene_mod_hypoF,"mod_color2",function(df) df[,'gene_id'])
+
+# module eigengenes
+MEList_hypoF = moduleEigengenes(datExpr_hypoF, colors=mod_hypoF,softPower=softPower,verbose=5,excludeGrey=TRUE)
+MEs_hypoF = MEList_hypoF$eigengenes
+@ 
+
+\section{Compare hypomethylated and non-hypomethylated modules}
+
+<<hypoT_hypoF_mod_hm,fig.width=5.5,fig.height=4.5,cache=FALSE>>=
+MEO_hypoT = orderMEs(MEs_hypoT,greyName="MEO")
+MEO_hypoF = orderMEs(MEs_hypoF,greyName="MEO")
+
+hypoTModuleAnnot = unique(gene_mod_hypoT[,c("mod","mod_color","mod_color2")])
+hypoTModuleAnnot = ModuleAnnot[match(substring(names(MEO_hypoT),3),hypoTModuleAnnot[,'mod']),]
+
+hypoFModuleAnnot = unique(gene_mod_hypoF[,c("mod","mod_color","mod_color2")])
+hypoFModuleAnnot = hypoFModuleAnnot[match(substring(names(MEO_hypoF),3),hypoFModuleAnnot[,'mod']),]
+
+# number of modules
+nHypoTMods = nrow(hypoTModuleAnnot)
+nHypoFMods = nrow(hypoFModuleAnnot)
+
+# Initialize tables of p-values and of the corresponding counts
+pTable = matrix(0, nrow = nHypoTMods, ncol = nHypoFMods);
+CountTbl = matrix(0, nrow = nHypoTMods, ncol = nHypoFMods);
+
+# Execute all pairwaise comparisons
+for (rmodi in 1:nHypoTMods) {
+    for (nrmodi in 1:nHypoFMods) {
+        rmod = hypoTModuleAnnot[rmodi,'mod']
+        hypoTMembers = (mod_hypoT == rmod);
+        nrmod = hypoFModuleAnnot[nrmodi,'mod']
+        hypoFMembers = (mod_hypoF == nrmod);
+        pTable[rmodi, nrmodi] = -log10(fisher.test(hypoTMembers, hypoFMembers, alternative = "greater")$p.value);
+        CountTbl[rmodi, nrmodi] = sum(mod_hypoT == rmod & mod_hypoF == nrmod)
+    }
+}
+
+# Truncate p values smaller than 10^{-50} to 10^{-50}
+pTable[is.infinite(pTable)] = 1.3*max(pTable[is.finite(pTable)]);
+pTable[pTable>50 ] = 50 ;
+# Marginal counts (really module sizes)
+hypoTModTotals = apply(CountTbl, 1, sum)
+hypoFModTotals = apply(CountTbl, 2, sum)
+# Actual plotting
+#sizeGrWindow(10,7 );
+
+#pdf(file=paste0(prefix.string,'hypoT_hypoF_mod_hm.pdf'),wi=6,he=5);
+par(mfrow=c(1,1));
+par(cex = 1.0);
+par(mar=c(8, 10.4, 2.7, 1)+0.3);
+# Use function labeledHeatmap to produce the color-coded table with all the trimmings
+labeledHeatmap(Matrix = pTable,
+               #xLabels = paste0("ME",hypoFModuleAnnot[,'mod_color']),
+               #yLabels = paste0("ME",hypoTModuleAnnot[,'mod_color']),
+               colorLabels = FALSE,
+               xLabels = paste(hypoFModuleAnnot[,'mod_color2'], " (",hypoFModTotals,")",sep=""),
+               yLabels = paste(hypoTModuleAnnot[,'mod_color2']," (", hypoTModTotals, ")",sep=""),
+               textMatrix = CountTbl,
+               colors = blueWhiteRed(100)[50:100],
+               main = "Module overlap heatmap",
+               cex.text = 1.0, cex.lab.x=1,cex.lab.y=1, setStdMargins = FALSE);
+#dev.off()
+@ 
+
+<<hypo_gp_output,echo=FALSE,results="hide">>=
+#gp_params = expand.grid(max_set_size=c(1000,1500,2000),
+#    hier_filtering=c('none','moderate','strong'))
+#gp_params = expand.grid(max_set_size=c(800),
+#    hier_filtering=c('none'))
+run_hypo_gp = "run_hypo_gp" %in% step_list
+hypo_gene_lists = c(gene_list_hypoT,gene_list_hypoF)
+
+gp_params = expand.grid(max_set_size=c(800,1000,1250,1500,2000),
+   hier_filtering=c('none'))
+#gp_params = expand.grid(max_set_size=c(1500),
+#   hier_filtering=c('none'))
+
+hypo_gp_output_all = run_gprofiler_all(hypo_gene_lists,'hypo',gp_params,run_gp=run_hypo_gp)
+@
+
+<<read_hypo_gp,echo=FALSE>>=
+hypo_gp = adply(hypo_gp_output_all,1,function(gp) {
+  fread(paste0(gp[1,'output_prefix'],'.txt'),colClasses=c("significant"="character"))
+  },.parallel=T)
+hypo_gp=ddply(hypo_gp,c("max_set_size","hier_filtering",".id","domain"),
+               transform,p.value.rank=rank(p.value))
+#hypo_gp[,'.id'] = gsub(' nS','',hypo_gp[,'.id'])
+@
+
+<<plot_hypo_gp_hm,echo=FALSE,results="hide",warning=FALSE>>=
+genelist_summary = data.table(name.exp=names(hypo_gene_lists),name.display=names(hypo_gene_lists))
+
+acc_top20_terms = unique(subset(hypo_gp,p.value.rank<=20 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+hypo_gp_top20 = merge(acc_top20_terms,hypo_gp)
+acc_top15_terms = unique(subset(hypo_gp,p.value.rank<=15 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+hypo_gp_top15 = merge(acc_top15_terms,hypo_gp)
+acc_top10_terms = unique(subset(hypo_gp,p.value.rank<=10 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+hypo_gp_top10 = merge(acc_top10_terms,hypo_gp)
+
+d_ply(hypo_gp_top20,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'hypo_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top20_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4.8
+             )
+})
+
+d_ply(hypo_gp_top15,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'hypo_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top15_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3.6,4.8
+             )
+})
+
+d_ply(hypo_gp_top10,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'hypo_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top10_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=genelist_summary[,name.display],
+             eps_file,3,4
+             )
+})
+@
+
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

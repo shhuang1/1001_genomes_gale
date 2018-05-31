@@ -1,0 +1,132 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(plyr)
+library(R.utils)
+@
+
+<<set_file_path,echo=FALSE>>=
+tbam_stats_02_path = file.path(PROJ_RESULTS_PATH,"tbam_stats_02")
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"tbam_stats_2015-02-03")
+prefix.string = file.path(this_analysis_path,"graphics","tbam_stats_2015-02-03-")
+step_list = "write_mapped_nreads"
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE)
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome QC stats}
+\date{February 3, 2014}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Stat numbers in \\ \verb|\Sexpr{tbam_stats_02_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(11)
+getDoParWorkers()
+@
+
+<<read_stat_02,echo=FALSE,cache=FALSE>>=
+load_mapped_nreads<-function(stat_curr) {
+  stat_txt = file.path(stat_curr[1,'tbam_stat_02'],'flag_stat.txt')
+  if (file.exists(stat_txt) & file.info(stat_txt)$size>0) {
+    stat_lines = readLines(stat_txt)
+    nreads_p = paste0('(\\d+)\\s\\+\\s(\\d+)\\smapped')
+    m = regmatches(stat_lines,regexpr(nreads_p,stat_lines))
+    nreads = as.integer(regmatches(m,regexec(nreads_p,m))[[1]][2])
+    return(data.frame(nmapped=nreads))
+  }
+} 
+
+stat_df = data.frame(sample=list.files(tbam_stats_02_path),stringsAsFactors=F)
+stat_df = within(stat_df, {
+  tbam_stat_02=file.path(tbam_stats_02_path,sample)
+  sample_id2 = laply(strsplit(sample,'_'),function(el) el[[1]])
+})
+stat_df = within(stat_df,{
+  Source = laply(strsplit(sample,'_'),function(el) {
+    ifelse(length(el)>1,el[[2]],"Salk")
+  })
+})
+
+mapped_nreads_df = adply(stat_df,1,function(stat_curr) {
+  #print(stat_curr)
+  load_mapped_nreads(stat_curr)
+})
+mapped_nreads_df = mapped_nreads_df[with(mapped_nreads_df,order(nmapped)),]
+
+if ("write_mapped_nreads" %in% step_list) {
+        write.table(mapped_nreads_df[,c("sample","nmapped")],paste0(prefix.string,"nreads_mapped.txt"),
+                sep="\t",row.names=F,col.names=T,quote=F)
+}
+@
+
+<<mapped_nreads_hist,echo=FALSE,fig.width=4,fig.height=4>>=
+#p1a = ggplot(mapped_nreads_df,aes(x=nmapped/1e6))
+#p1b = p1a + geom_histogram() + facet_grid(Source~.)
+p1a = ggplot(subset(mapped_nreads_df,Source=='Salk'),aes(x=nmapped/1e6))
+p1b = p1a + geom_histogram()
+p1c = p1b + scale_x_continuous("Number of mapped reads (million)",breaks=seq(0,130,by=10)) + 
+  scale_y_continuous("Number of samples",breaks=seq(0,600,by=20)) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+print(p1c)
+@
+
+<<mapped_nreads_cumhist,echo=FALSE,fig.width=4,fig.height=4>>=
+mapped_nreads_df_x = ddply(mapped_nreads_df,"Source",transform,len=length(nmapped))
+#p2a = ggplot(mapped_nreads_df_x,aes(x=nmapped/1e6,color=Source))
+p2a = ggplot(subset(mapped_nreads_df_x,Source=='Salk'),aes(x=nmapped/1e6))
+p2b = p2a + 
+  geom_step(aes(len=len,y=..y.. * len),stat="ecdf") 
+p2c = p2b + scale_x_continuous("Number of mapped reads (million)",
+                               breaks=seq(0,130,by=10)) +
+  scale_y_continuous("Cumulative number of samples",breaks=seq(0,850,by=50)) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5),
+        legend.position=c(1,0.5),
+        legend.justification=c(1,0))
+print(p2c)
+@
+
+<<sessionInfo>>=
+sessionInfo()
+
+@
+
+\end{document}

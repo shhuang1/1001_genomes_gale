@@ -1,0 +1,103 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(xlsx)
+library(R.utils)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"make_ms_tables_2016-05-03")
+prefix.string = file.path(this_analysis_path,"graphics","make_ms_tables_2016-05-03-")
+rdata_prefix = file.path(this_analysis_path,'make_ms_tables_2016-05-03-')
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = FALSE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/make_ms_tables_2016-05-03-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{Data tables for 1001 Epigenomes manuscript}
+\date{May 3, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+\section{Supplemental table for differentially expressed genes}
+
+<<supp_table_deg>>=
+allgroups2_deg = read.table(file.path(PROJ_RESULTS_PATH,'acc_variable_genes_2016-04-21/acc_variable_genes_2016-04-21-topTable_allgroups2_k4_fdr5.tsv'),sep='\t',header=TRUE,stringsAsFactors=FALSE)
+colnames(allgroups2_deg) = sub('logFC.cmp','logFC.',colnames(allgroups2_deg))
+rvnr_deg = read.table(file.path(PROJ_RESULTS_PATH,'acc_variable_genes_2016-04-21/acc_variable_genes_2016-04-21-topTable_rvnr_k4_fdr5.tsv'),sep='\t',header=TRUE,stringsAsFactors=FALSE)
+
+deg_xlsx_file = paste0(rdata_prefix,'DEG_FDR5.xlsx')
+deg_wb = createWorkbook()
+deg_wb_a = createSheet(wb=deg_wb,sheetName="TableS3A")
+deg_wb_b = createSheet(wb=deg_wb,sheetName="TableS3B")
+addDataFrame(x=allgroups2_deg,sheet=deg_wb_a)
+addDataFrame(x=rvnr_deg,sheet=deg_wb_b)
+saveWorkbook(deg_wb,deg_xlsx_file)
+rm(deg_wb)
+@ 
+
+\section{Supplemental table for relict and non-relict co-expression modules}
+
+<<supp_table_mod>>=
+rel_mod = read.table(file.path(PROJ_RESULTS_PATH,'wgcna_analysis_2016-04-23/wgcna_analysis_2016-04-23-gene_color_rel.tsv'),sep='\t',header=TRUE,quote="",stringsAsFactors=FALSE)
+rel_mod = rel_mod[,c('gene_id','mod_color','mod')]
+nonrel_mod = read.table(file.path(PROJ_RESULTS_PATH,'wgcna_analysis_2016-04-23/wgcna_analysis_2016-04-23-gene_color_nonrel.tsv'),sep='\t',header=TRUE,quote="",stringsAsFactors=FALSE)
+nonrel_mod = nonrel_mod[,c('gene_id','mod_color','mod')]
+
+mod_xlsx_file =  paste0(rdata_prefix,'WGCNA_mod.xlsx')
+mod_wb = createWorkbook()
+mod_wb_a = createSheet(wb=mod_wb,sheetName="TableS4A")
+mod_wb_b = createSheet(wb=mod_wb,sheetName="TableS4B")
+addDataFrame(x=rel_mod,sheet=mod_wb_a)
+addDataFrame(x=nonrel_mod,sheet=mod_wb_b)
+saveWorkbook(mod_wb,mod_xlsx_file)
+rm(mod_wb)
+@ 
+
+<<sessionInfo>>=
+sessionInfo()
+@
+
+\end{document}

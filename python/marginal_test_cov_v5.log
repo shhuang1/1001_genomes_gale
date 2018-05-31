@@ -1,0 +1,19 @@
+2016-01-26 14:17:45,649 INFO Loading genotype from /gale/netapp/home/shhuang/data/1001_genomes/gmi_release_v3.1/1001genomes_snp-short-indel_only_ACGTN_1001tx_filter1_2.hdf5
+2016-01-26 14:17:45,803 INFO Loading phenotype from /gale/netapp/home/shhuang/projects/1001_genomes/ath1001_tx_norm_2016-01-03/ath1001_tx_norm_2016-01-03-gNorm_normCounts_k4_1001g_vst_cv0p05_rinT.hdf5
+2016-01-26 14:17:45,831 INFO Creating QTL dataset
+2016-01-26 14:17:53,441 INFO Calculating sample relatedness
+2016-01-26 14:18:22,509 INFO Subset phenotype to index 0-5
+2016-01-26 14:18:22,511 INFO Number of individuals: 671; number of SNPs: 1673530; number of phenotypes: 5
+2016-01-26 14:18:22,511 INFO Plotting phenotype histograms
+2016-01-26 14:18:22,911 INFO Start loading covariance from /gale/netapp/home/shhuang/projects/1001_genomes/ath1001_tx_norm_2016-01-03/ath1001_tx_norm_2016-01-03-gNorm_W_k4.txt
+2016-01-26 14:18:22,914 INFO Finished
+2016-01-26 14:18:22,914 INFO Start testing: LM
+2016-01-26 14:28:57,289 INFO Start testing: LMM
+2016-01-26 14:39:33,627 INFO Saving P-values to text file
+2016-01-26 14:39:46,587 INFO Plotting Manhattan plots
+2016-01-26 14:40:06,169 INFO Plotting phenotype vs. SNP
+2016-01-26 14:40:06,862 INFO Plotting P-value histograms
+2016-01-26 14:40:08,517 INFO Plotting Q-Q plots
+2016-01-26 14:40:46,719 INFO Plotting LM vs LMM P-values
+2016-01-26 14:41:04,826 INFO Done with all plots!
+2016-01-26 14:41:04,827 INFO Done!

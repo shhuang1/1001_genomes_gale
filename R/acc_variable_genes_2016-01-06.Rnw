@@ -1,0 +1,525 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(DESeq2)
+library(gdata)
+library(genefilter)
+library(ggmap)
+library(ggplot2)
+library(gProfileR)
+library(NMF)
+library(pheatmap)
+library(RColorBrewer)
+library(R.utils)
+library(vsn)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+vsd_rdata_file = file.path(PROJ_RESULTS_PATH,"ath1001_tx_norm_2016-01-03","ath1001_tx_norm_2016-01-03-vsd_blind.RData")
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"acc_variable_genes_2016-01-06")
+prefix.string = file.path(this_analysis_path,"graphics","acc_variable_genes_2016-01-06-")
+rdata_prefix = file.path(this_analysis_path,'acc_variable_genes_2016-01-06-')
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path = 'cache/acc_variable_genes_2016-01-06-')
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'pca_group1_na') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{1001 transcriptome highly variable genes by DESeq2}
+\date{January 6, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item rmake data in \\ \verb|\Sexpr{tfq_oberon3_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<load_vsd>>=
+load(vsd_rdata_file) # loaded vsd,ddsMat
+vsd_mat = assay(vsd)
+@ 
+
+<<plot_vsd>>=
+par( mfrow = c( 1, 2 ) )
+plot(log2(1+counts(ddsMat, normalized=TRUE)[ , 1:2] ),
+          col=rgb(0,0,0,.2), pch=16, cex=0.3 )
+plot( assay(vsd)[ , 1:2],
+          col=rgb(0,0,0,.2), pch=16, cex=0.3 )
+@ 
+
+<<run_deseq,echo=FALSE,eval=FALSE>>=
+ddsMat = DESeq(ddsMat)
+res = results(ddsMat)
+@ 
+
+<<save_ncounts,echo=FALSE>>=
+if ("save_ncounts" %in% step_list) {
+   save(ddsMat,deseq_ncounts,file=paste0(rdata_prefix,'dds.RData'))
+   write.table(deseq_ncounts,paste0(rdata_prefix,'deseq_ncounts.txt'),quote=F,sep='\t',row.names=T)
+}
+@ 
+
+<<sample_pca_plot>>=
+rv = rowVars(vsd_mat)
+select = order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+pca = prcomp(t(vsd_mat[select, ]))
+
+pca_x2 = data.frame(pca$x,tg_ecotypeid=colData(vsd)[,'tg_ecotypeid'])
+pca_g1 = data.frame(PC1_group=ifelse(pca$x[,'PC1']<=25,1,2),tg_ecotypeidx=colData(vsd)[,'tg_ecotypeidx'])
+pca_g1 = merge(pca_g1,acc_list_1001g[,list(tg_ecotypeidx,longitude,latitude)])
+
+aload = abs(pca$rotation)
+aload_rel = sweep(aload, 2, colSums(aload), "/")
+@ 
+
+<<sample_pca_gplot,fig.width=5,fig.height=3>>=
+vsd$plate_batch2 = salk_tx_platebatch[match(colData(vsd)[,'tg_ecotypeid'],tg_ecotypeid),plate_batch2]
+pca_dat = DESeq2::plotPCA(vsd,intgroup="plate_batch2",returnData=TRUE)
+percentVar <- round(100 * attr(pca_dat, "percentVar"))
+p4a = ggplot(data=pca_dat,aes(PC1, PC2, color=factor(group))) 
+p4b = p4a + geom_point(size=3)
+p4c = p4b + 
+  scale_color_brewer(palette='Set1') +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+@
+
+<<sample_pca_gplot2,fig.width=5,fig.height=3>>=
+pca_dat = DESeq2::plotPCA(vsd,intgroup="group",returnData=TRUE)
+percentVar <- round(100 * attr(pca_dat, "percentVar"))
+p4a = ggplot(data=pca_dat,aes(PC1, PC2, color=(group=='relict'))) 
+p4b = p4a + geom_point(size=3)
+p4c = p4b + 
+  scale_color_brewer(palette='Set1') +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+@
+
+<<sample_pca_gplot,fig.width=5,fig.height=3>>=
+pca_dat = DESeq2::plotPCA(vsd,intgroup="group",returnData=TRUE)
+pca_dat$long = acc_list_1001g[match(colData(vsd)[,'tg_ecotypeid'],tg_ecotypeid),longitude]
+pca_dat$lat = acc_list_1001g[match(colData(vsd)[,'tg_ecotypeid'],tg_ecotypeid),latitude]
+percentVar <- round(100 * attr(pca_dat, "percentVar"))
+
+p4a = ggplot(data=pca_dat,aes(PC1,long,color=factor(group))) 
+p4b = p4a + geom_point(size=3)
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+
+p4a = ggplot(data=pca_dat,aes(PC1,lat,color=factor(group))) 
+p4b = p4a + geom_point(size=3)
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+
+p4a = ggplot(data=pca_dat,aes(PC2,long,color=factor(group))) 
+p4b = p4a + geom_point(size=3)
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+
+p4a = ggplot(data=pca_dat,aes(PC2,lat,color=factor(group))) 
+p4b = p4a + geom_point(size=3)
+p4c = p4b + 
+  scale_color_brewer(palette='Set3') +
+  theme_bw() +
+  guides(colour=guide_legend(override.aes=list(size=2))) + 
+  theme(legend.key = element_blank())
+print(p4c)
+@
+
+<<sample_dist_mat>>=
+sampleDists = dist(t(vsd_mat))
+sampleDistMat = as.matrix(sampleDists)
+@
+
+<<sample_dist_hm,fig.width=5,fig.height=3>>=
+aheatmap(sampleDistMat,color="-Blues:255",
+         distfun=sampleDists,
+         annRow=data.frame(Group=as.character(colData(vsd)[,'group']),
+                           PCA_Group1=factor(pca_g1[,'PC1_group'])),
+         annColors=hm_ann_cols)
+@ 
+
+<<sample_mds_plot>>=
+mds = cbind(data.frame(cmdscale(sampleDistMat)),data.frame(colData(vsd)))
+p1a = ggplot(data=mds,aes(x=X1,y=X2,color=group))
+p1b = p1a + geom_point()
+p1c = p1b + xlab("Dimension 1") +
+  ylab("Dimension 2") +
+  theme_bw()
+print(p1c)
+#qplot(X1,X2,color=continent,data=mds)
+@
+
+<<top_var_5perc_hm>>=
+topVarGenes = head(order(-rowVars(vsd_mat)),floor(nrow(vsd_mat)*0.05))
+mat = vsd_mat[ topVarGenes, ]
+mat = mat - rowMeans(mat)
+
+topVarGenes1p = head(order(-rowVars(vsd_mat)),floor(nrow(vsd_mat)*0.01))
+topVarGenes10p = head(order(-rowVars(vsd_mat)),floor(nrow(vsd_mat)*0.10))
+
+aheatmap(mat,color="-YlOrRd:255",
+         scale="row",labRow=NULL,
+         verbose=T,
+         annCol=data.frame(Group=as.character(colData(vsd)[,'group']),
+                           PCA_Group1=factor(pca_g1[,'PC1_group'])),
+         annColors=hm_ann_cols)
+
+var_order = order(-rowVars(vsd_mat))
+write.table(rownames(vsd_mat)[var_order],
+            paste0(rdata_prefix,'vsd_var_sorted_genes.txt'),
+            sep='\t',quote=F,row.names=F,col.names=F)
+@
+
+<<gp_params,echo=FALSE>>=
+#gp_params = expand.grid(max_set_size=c(1000,1500,2000),
+#    hier_filtering=c('none','moderate','strong'))
+gp_params = expand.grid(max_set_size=c(1500),
+    hier_filtering=c('none'))
+@ 
+
+<<run_gprofiler,echo=FALSE,cache=FALSE>>=
+run_gprofiler<-function(gene_list,gene_list_name,gp_params,run_gp=TRUE) {
+  gp_output = adply(gp_params,1,function(p) {
+      output_prefix = paste0(prefix.string,gene_list_name,'_max',p[1,'max_set_size'],'_f',p[1,'hier_filtering'])
+      if (run_gp) {
+        gprofiler(gene_list,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'],
+                  png_fn=paste0(output_prefix,'.png'))
+        gp_result = gprofiler(gene_list,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'])
+        write.table(gp_result,paste0(output_prefix,'.txt'),sep="\t",row.names=F,col.names=T,quote=F)
+    }
+        data.frame(output_prefix)
+    },.parallel=T)
+ return(gp_output) 
+}
+max_user_p = 0.5
+run_gprofiler_all<-function(gene_list,gene_list_name,gp_params,run_gp=TRUE) {
+  gp_output = adply(gp_params,1,function(p) {
+      output_prefix = paste0(prefix.string,gene_list_name,'_max',p[1,'max_set_size'],'_f',p[1,'hier_filtering'],'_all')
+      print(output_prefix)
+      if (run_gp) {
+        gp_result = ldply(gene_list,function(gl) 
+          gprofiler(gl,organism='athaliana',hier_filtering=p[1,'hier_filtering'],
+                  max_set_size=p[1,'max_set_size'],significant=F,max_p_value=max_user_p),
+                          .parallel=T)
+        write.table(gp_result,paste0(output_prefix,'.txt'),sep="\t",row.names=F,col.names=T,quote=F)
+    }
+        data.frame(output_prefix)
+    })
+ return(gp_output) 
+}
+@
+
+<<plot_gp_hm,echo=FALSE,cache=FALSE>>=
+plot_gp_hm<-function(group_gp_plot,motif_select_dt,orderCol,hm_file,hm_width,hm_height,...) {
+    
+  group_gp_plot0 = stats::reshape(group_gp_plot[,c('.id','term.name','p.value')],
+                           idvar='term.name',timevar='.id',v.names='p.value',
+                           direction='wide')
+  
+  rownames(group_gp_plot0) = group_gp_plot0[,'term.name']
+  group_gp_plot0[,'term.name'] = NULL
+  colnames(group_gp_plot0) = gsub('p.value.','',colnames(group_gp_plot0))
+  group_gp_plot0 = NAToUnknown(group_gp_plot0,unknown=max_user_p,force=T)
+  colnames(group_gp_plot0) = sapply(colnames(group_gp_plot0),function(qn) {
+    motif_select_dt[name.exp==qn,][1,name.display]
+  })
+  if (!is.na(orderCol)) {
+      group_gp_plot0 = group_gp_plot0[,orderCol[orderCol %in% colnames(group_gp_plot0)]]
+  }
+  print(colnames(group_gp_plot0))
+  
+  postscript(file=hm_file,onefile=FALSE, width=hm_width,height=hm_height,horizontal=FALSE)
+  aheatmap(-log10(as.matrix(group_gp_plot0)),color="YlOrRd:20",scale="none",
+           Rowv=TRUE,revC=TRUE,
+           verbose=F,...)
+  dev.off()
+}
+@
+
+<<acc_gp_output,echo=FALSE,results="hide">>=
+acc_gene_lists = list('top5p_var'=rownames(vsd_mat)[topVarGenes],
+                      'top1p_var'=rownames(vsd_mat)[topVarGenes1p],
+                      'top10p_var'=rownames(vsd_mat)[topVarGenes10p])
+
+run_acc_gp = "run_acc_gp" %in% step_list
+
+acc_gp_output_all = run_gprofiler_all(acc_gene_lists,'acc_var',gp_params,run_gp=run_acc_gp)
+@
+
+<<read_acc_gp,echo=FALSE>>=
+acc_gp = adply(acc_gp_output_all,1,function(gp) {
+  fread(paste0(gp[1,'output_prefix'],'.txt'),colClasses=c("significant"="character"))
+  },.parallel=T)
+acc_gp=ddply(acc_gp,c("max_set_size","hier_filtering",".id","domain"),
+               transform,p.value.rank=rank(p.value))
+#acc_gp[,'.id'] = gsub(' nS','',acc_gp[,'.id'])
+@
+
+<<plot_acc_gp_hm,echo=FALSE,results="hide",warning=FALSE>>=
+genelist_summary = data.table(name.exp=c('top5p_var','top1p_var','top10p_var'),
+                              name.display=c('top 5% varied','top 1% varied','top 10% varied'))
+
+acc_top20_terms = unique(subset(acc_gp,p.value.rank<=20 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top20 = merge(acc_top20_terms,acc_gp)
+acc_top15_terms = unique(subset(acc_gp,p.value.rank<=15 & significant==TRUE & domain %in% c("BP"))[,c('max_set_size','hier_filtering','term.id')])
+acc_gp_top15 = merge(acc_top15_terms,acc_gp)
+
+d_ply(acc_gp_top20,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top20_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=c("top 1% varied","top 5% varied","top 10% varied"),
+             eps_file,3.6,4.8,
+             Colv=NA
+             )
+})
+
+d_ply(acc_gp_top15,c("max_set_size","hier_filtering","domain"),function(x) {
+  eps_file = paste0(prefix.string,'acc_max',x[1,'max_set_size'],'_f',x[1,'hier_filtering'],'_top15_',x[1,'domain'],'.eps')
+  print(eps_file)
+  plot_gp_hm(x,genelist_summary,
+             orderCol=c("top 1% varied","top 5% varied","top 10% varied"),
+             eps_file,3.6,3.8,
+             Colv=NA,cexRow=0.5,
+             )
+})
+@
+
+<<meanSdPlot,eval=FALSE>>=
+par(mfrow=c(1,2))
+notAllZero = (rowSums(counts(ddsMat))>0)
+meanSdPlot(log2(counts(ddsMat)[notAllZero, ] + 1))
+meanSdPlot(vsd_mat[notAllZero, ])
+@ 
+
+<<pca_color_by_eid,fig.width=4,fig.height=2.5>>=
+p4a = ggplot(data=pca_x2,aes(x=PC1,y=PC2,color=tg_ecotypeid))
+p4b = p4a + geom_point()
+p4c = p4b + theme_bw()
+print(p4c)
+@ 
+
+<<pca_group1_eu,echo=FALSE,results="hide">>=
+map_eu = get_map(location = 'Europe', zoom = 4,maptype="hybrid")
+p2a = ggmap(map_eu)
+p2b = p2a 
+p2c = p2b + geom_point(data=pca_g1,aes(x=longitude,y=latitude,color=factor(PC1_group)),
+                       alpha=0.8)
+p2d = p2c + scale_color_discrete("PC1 Group") +
+    theme_bw()                          
+print(p2d)
+@
+
+
+<<pca_group1_na,echo=FALSE,results="hide">>=
+map_na = get_map(location = 'North America', zoom = 3,maptype="hybrid")
+p3a = ggmap(map_na)
+p3b = p3a 
+p3c = p3b + geom_point(data=pca_g1,aes(x=longitude,y=latitude,color=factor(PC1_group)),
+                       alpha=0.8)
+p3d = p3c + scale_color_discrete("PC1 Group") +
+    xlab("longitude") + ylab("latitude") +
+    theme_bw()                          
+print(p3d)
+@
+
+<<>>=
+read_pairs_dat<-function(dat_file,value_name) {
+    dat = read.table(dat_file,sep='\t',row.names=1,quote="")
+    dat = as.matrix(dat)
+    rownames(dat) = paste0("X",rownames(dat))
+    colnames(dat) = rownames(dat)
+    dat_long = melt(dat,value.name=value_name)
+    rownames(dat_long) = with(dat_long,paste(Var1,Var2,sep="_"))
+    return(list(dat=dat,dat_long=dat_long))
+}
+
+## expression correlations
+expr_dist = melt(sampleDistMat,value.name="expr")
+expr_pcc = cor(vsd_mat)
+rownames(expr_pcc) = colnames(expr_pcc) = colData(vsd)[,'tg_ecotypeidx']
+expr_pcc_long = melt(expr_pcc,value.name="expr_pcc")
+rownames(expr_pcc_long) = with(expr_pcc_long,paste(Var1,Var2,sep='_'))
+expr_spc = cor(vsd_mat,method="spearman")
+rownames(expr_spc) = colnames(expr_spc) = colData(vsd)[,'tg_ecotypeidx']
+expr_spc_long = melt(expr_spc,value.name="expr_spc")
+rownames(expr_spc_long) = with(expr_spc_long,paste(Var1,Var2,sep='_'))
+
+## genotype correlations
+kinship_maf1_csv = '/gale/netapp/home/shhuang/projects/1001_genomes/marginal_test_cov_01/kinship_maf1.csv'
+kinship_mac5_csv = '/gale/netapp/home/shhuang/data/1001_genomes/gmi_release_v3.1/SNP_matrix_imputed_hdf5/1001_SNP_MATRIX/kinship_ibs_mac5.csv'
+samplecov_maf1_csv = '/gale/netapp/home/shhuang/projects/1001_genomes/marginal_test_cov_01/samplecov_maf1.csv'
+
+ibd = read_pairs_dat(kinship_maf1_csv,'ibd')
+ibs = read_pairs_dat(kinship_mac5_csv,'ibs')
+#transk = read_pairs_dat(samplecov_maf1_csv,'transk')
+
+## methylome correlations
+dmr_pcc = load_dmr_pcc()
+dmr_pcc_long = llply(dmr_pcc,function(pcc) {
+    rownames(pcc) = paste0("X",rownames(pcc))
+    colnames(pcc) = paste0("X",colnames(pcc))
+    pcc_long = melt(pcc,value.name='pcc')
+    rownames(pcc_long) = with(pcc_long,paste(Var1,Var2,sep="_"))
+    return(pcc_long)
+})
+                     
+pair_names = intersect(rownames(expr_pcc_long),rownames(dmr_pcc_long[['cor_c_p']]))
+
+merge_dist = data.frame(expr_pcc_long[pair_names,],
+                        expr_spc=expr_spc_long[pair_names,'expr_spc'],
+                        ibd=ibd[['dat_long']][pair_names,'ibd'],
+                        ibs=ibs[['dat_long']][pair_names,'ibs'],
+                        c_pcc=dmr_pcc_long[['cor_c_p']][pair_names,'pcc'],
+                        cg_pcc=dmr_pcc_long[['cor_cg_p']][pair_names,'pcc'],
+                        ch_pcc=dmr_pcc_long[['cor_ch_p']][pair_names,'pcc'])
+
+#                        transk[['dat_long']][pair_names,'transk'])
+merge_dist = within(merge_dist,{
+    acc1_group = acc_list_1001g[match(Var1,tg_ecotypeidx),group]
+    acc2_group = acc_list_1001g[match(Var2,tg_ecotypeidx),group]
+})
+
+merge_dist = within(merge_dist,{
+    relict_count = ((acc1_group=='relict')+(acc2_group=='relict'))
+})
+
+
+par(mfrow=c(2,4))
+plot(c_pcc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(cg_pcc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(ch_pcc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~ibs,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~c_pcc,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~cg_pcc,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+plot(expr_spc~ch_pcc,data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group))
+@ 
+
+<<expr_dist_within_group>>=
+p5a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group==acc2_group),
+             aes(x=expr_spc))
+p5b = p5a + geom_histogram() + facet_wrap(~acc1_group,scales="free_y")
+p5c = p5b + theme_bw()
+print(p5c)
+@ 
+
+<<expr_dist_btw_group>>=
+p6a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group),
+             aes(x=expr_spc))
+p6b = p6a + geom_histogram() + facet_wrap(~acc1_group,scales="free_y")
+p6c = p6b + theme_bw()
+print(p6c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2),
+             aes(x=ibs,y=expr_spc))
+p7b = p7a + stat_binhex(bins=100)
+p7c = p7b + theme_bw()
+print(p7c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group!=acc2_group),
+             aes(x=ibs,y=expr_spc))
+p7b = p7a + stat_binhex(bins=100) + facet_wrap(~acc1_group)
+p7c = p7b + theme_bw()
+print(p7c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2),
+             aes(x=ibs,y=expr_spc))
+p7b = p7a + stat_binhex(bins=100) + facet_wrap(~relict_count)
+p7c = p7b + scale_colour_brewer(palette="Set1") +
+    theme_bw()
+print(p7c)
+@ 
+
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2),
+             aes(x=snp,y=expr,color=acc2_group))
+p7b = p7a + geom_point() + facet_wrap(~acc1_group)
+p7c = p7b + scale_colour_brewer(palette="Set3") +
+    theme_bw()
+print(p7c)
+@ 
+
+<<>>=
+p7a = ggplot(data=subset(merge_dist,Var1!=Var2 & acc1_group==acc2_group),
+             aes(x=acc1_group,y=expr))
+p7b = p7a + geom_boxplot()
+p7c = p7b + theme_bw()
+print(p7c)
+@ 
+
+
+
+
+<<sessionInfo>>=    
+sessionInfo()
+@
+
+\end{document}

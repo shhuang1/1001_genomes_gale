@@ -1,0 +1,284 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx, verbatim}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{url}
+\setlength{\textwidth}{6.5in} 
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{0in} 
+\setlength{\evensidemargin}{0in}
+\setlength{\topmargin}{-1.5cm}
+
+<<load_lib,include=FALSE,results="hide">>=
+library(data.table)
+library(doMC)
+library(ggplot2)
+library(plyr)
+library(RColorBrewer)
+library(R.utils)
+library(scales)
+library(Vennerable)
+source("get_file_paths.R")
+@
+
+<<set_file_path,echo=FALSE>>=
+this_analysis_path = file.path(PROJ_RESULTS_PATH,"eqtl_general_stats_2016-05-01")
+prefix.string = file.path(this_analysis_path,"graphics","eqtl_general_stats_2016-05-01-")
+rdata_prefix = file.path(this_analysis_path,"eqtl_general_stats_2016-05-01-")
+step_list = ""
+@
+
+\begin{document}
+<<setup, include=FALSE, cache=FALSE>>=
+# set global chunk options
+opts_chunk$set(cache = TRUE) # enable cache to make it faster
+opts_chunk$set(fig.path=prefix.string, fig.align='center', fig.show='hold',
+               eval=TRUE,echo=TRUE,include=TRUE,
+               cache.path="cache/eqtl_general_stats_2016-05-01-")
+
+knit_hooks$set(checkpoint = function(before, options, envir) {
+  # e.g. we skip all chunks after the chunk example-b
+  if (!before && options$label == options$checkpoint) {
+    opts_chunk$set(cache = FALSE, eval = FALSE, echo = FALSE, include = FALSE)
+    # you can do other things like dumping `envir` into globalenv(), e.g.
+    # assign('ChunkEnv', envir, envir = globalenv())
+  }
+})
+## set checkpoint=NULL to disable checkpoints
+opts_chunk$set(checkpoint = 'sessionInfo') # restore objects up to exmple-b
+## now if you knit() this document, only x exists; y is not loaded
+@
+
+\title{eQTL general statistics}
+\date{May 1, 2016}
+
+\maketitle
+
+\section{Settings}
+
+\begin{itemize}
+\item This analysis was run on \Sexpr{System$getHostname()}.
+\item Using eQTL test results in \verb|\Sexpr{eqtl_11_path}|.
+\end{itemize}
+
+<<setup_parallel>>=
+registerDoMC(32)
+getDoParWorkers()
+@
+
+<<thr_master>>=
+try_k = 2:5
+thr_info = data.frame(thr_name=c('1e5','1e6','1e7','1e8','5e8','1e9','1e10'),
+                      thr_val=c(1e-5,1e-6,1e-7,1e-8,5e-8,1e-9,1e-10),
+                      stringsAsFactors=FALSE)
+eqtl_k = expand.grid(eqtln=c(11,13,14,15),
+  k=2:5)
+
+k_master = rbindlist(alply(eqtl_k,1,function(ei) {
+  dt = fread(file.path(PROJ_RESULTS_PATH,sprintf('marginal_test_cov_%s_k%s/results/lmm_master/chr1genes_1e5.bed.sorted',ei[1,"eqtln"],ei[1,"k"])))
+  cbind(data.table(ei),dt)
+}))
+
+k_thr_numgenes = adply(thr_info,1,function(thr) {
+  unique(k_master[V5<=thr[1,'thr_val'],],by=c("eqtln","k","V4"))[,list(num_genes=.N),by=c("eqtln","k")]
+})
+
+k_thr_uniqpos = adply(thr_info,1,function(thr) {
+  unique(k_master[V5<=thr[1,'thr_val'],],by=c("V1","V2","k","eqtln"))[,list(num_pos=.N),by=c("eqtln","k")]
+})
+@
+
+<<num_genes_with_eqtl,fig.width=4,fig.height=1.2>>=
+k_thr_numgenes = within(k_thr_numgenes,{ thr_name=factor(thr_name)})
+
+p1a = ggplot(data=k_thr_numgenes,aes(x=k,y=num_genes,group=thr_name,color=thr_name))
+p1b = p1a + geom_line() + geom_point(size=0.5) + facet_wrap(~eqtln,ncol=4)
+p1c = p1b + scale_x_continuous("RUVg k=") +
+  scale_y_continuous("Number of genes") +
+  scale_color_discrete("p<=",
+                     breaks=k_thr_numgenes[,'thr_name'],
+                     labels=k_thr_numgenes[,'thr_val']) +
+  theme_bw() +
+  theme(axis.title.x=element_text(size=6),
+        axis.text.x=element_text(size=5),
+        axis.title.y=element_text(size=6),
+        axis.text.y=element_text(size=5),
+        legend.key=element_blank(),
+        legend.key.size=unit(0.5,"line"),
+        legend.text=element_text(size=5),
+        legend.title=element_text(size=6),
+        strip.text.x=element_text(size=5)
+        )
+
+#pdf(paste0(prefix.string,'num_genes_with_eqtl.pdf'),width=4,height=1.2)
+print(p1c)
+#dev.off()
+
+print(p1c%+%subset(k_thr_numgenes,thr_name!='1e5' & thr_name!='1e6'))
+@
+
+<<num_eqtl_pos,fig.width=3,fig.height=1.2>>=
+k_thr_uniqpos = within(k_thr_uniqpos,{ thr_name=factor(thr_name)})
+
+p2a = ggplot(data=k_thr_uniqpos,aes(x=k,y=num_pos,group=thr_name,color=thr_name))
+p2b = p2a + geom_line() + geom_point(size=0.5) + 
+  facet_wrap(~eqtln,ncol=4)
+p2c = p2b + scale_x_continuous("RUVg k=") +
+  scale_y_continuous("Number of unique positions") +
+  scale_color_discrete("p<=",breaks=k_thr_numgenes[,'thr_name'],
+                       labels=k_thr_numgenes[,'thr_val']) +
+  theme_bw() +
+  theme(axis.title.x=element_text(size=6),
+        axis.text.x=element_text(size=5),
+        axis.title.y=element_text(size=6),
+        axis.text.y=element_text(size=5),
+        legend.key=element_blank(),
+        legend.key.size=unit(0.5,"line"),
+        legend.text=element_text(size=5),
+        legend.title=element_text(size=6)
+        )
+        
+#pdf(paste0(prefix.string,'num_eqtl_pos.pdf'),width=4,height=1.2)
+print(p2c)
+#dev.off()
+
+print(p2c%+%subset(k_thr_uniqpos,thr_name!='1e5' & thr_name!='1e6'))
+@
+
+<<num_genes_pos_eqtl,fig.width=2.4,fig.height=1.8>>=
+num_genes_pos = merge(k_thr_numgenes,k_thr_uniqpos,by=c("thr_name","thr_val","k","eqtln"))
+
+base_breaks <- function(n = 10){
+        function(x) {
+                    axisTicks(log10(range(x, na.rm = TRUE)), log = TRUE, n = n)
+        }
+}
+
+p3a = ggplot(data=num_genes_pos,aes(x=num_pos,y=num_genes,group=factor(thr_name),color=factor(thr_name)))
+p3b = p3a + geom_point(aes(shape=factor(k)),size=0.5) + geom_line(size=0.4) +
+  facet_wrap(~eqtln,ncol=4)
+p3c = p3b + scale_shape_discrete("RUVg k=") +
+  scale_color_discrete("p<=",breaks=k_thr_numgenes[,'thr_name'],
+                       labels=k_thr_numgenes[,'thr_val']) +
+   scale_x_continuous("Number of positions",trans = log_trans(), breaks = base_breaks()) +
+  scale_y_continuous("Number of genes") +
+  theme_bw() +
+  theme(axis.title.x=element_text(size=8),
+        axis.text.x=element_text(size=6,angle=45,hjust=1),
+        axis.title.y=element_text(size=8),
+        axis.text.y=element_text(size=6),
+        legend.title=element_text(size=8),
+        legend.text=element_text(size=6),
+        legend.key=element_blank(),
+        legend.key.size=unit(0.5,"line"),
+        legend.text=element_text(size=5),
+        legend.title=element_text(size=6))
+
+#pdf(paste0(prefix.string,'num_genes_pos_eqtl.pdf'),width=4.4,height=1.5)
+print(p3c)
+#dev.off()
+
+print(p3c%+%subset(num_genes_pos,thr_name!='1e5' & thr_name!='1e6'))
+@ 
+
+<<tss_dist,fig.width=1.6,fig.height=1.6>>=
+tss_info = data.frame(allele=c("eQTL","eQTL_mCG","eQTL_mCH","eQTL_mC"),
+                      lmm_master_dir=c(file.path(eqtl_19_path,'results/lmm_master'),
+                                       file.path(eqtl_20_path,'dmCG_filtered_chr1-5/results/lmm_master/'),
+                                       file.path(eqtl_20_path,'dmCH_filtered_chr1-5/results/lmm_master'),
+                                       file.path(eqtl_20_path,'dmC_filtered_chr1-5/results/lmm_master')))
+
+tss_dt = rbindlist(alply(tss_info,1,function(tss) {
+    dt = fread(file.path(tss[1,'lmm_master_dir'],'chr1-5genesbonf_5e-2.bed.tss'))
+    dt = dt[,allele:=tss[1,'allele']]
+}))
+
+tss_dt = tss_dt[,dist_tss:=ifelse(V1==V6,ifelse(V11=='+',V2-V7,V7-V2),NA)]# distance if on same chromosome
+tss_dt2 = tss_dt[tss_dt[,.I[abs(dist_tss)==min(abs(dist_tss))],by=c("V4","allele")]$V1,] # take the closest for each gene
+tss_dt2 = tss_dt2[,dist_tss_trunc:=ifelse(abs(dist_tss)>100000,NA,dist_tss)]
+
+p4a = ggplot(data=tss_dt2,aes(x=dist_tss_trunc/1000,group=allele,color=allele))
+p4b = p4a + geom_freqpoly(binwidth=10,size=0.4)
+p4c = p4b + scale_color_brewer("",palette="Set1",
+                               breaks=c('eQTL','eQTL_mCG','eQTL_mCH','eQTL_mC'),
+                               labels=c("eQTL",expression(paste("eQTL"^"CG-DMB")),
+                                        expression(paste("eQTL"^"CH-DMB")),
+                                        expression(paste("eQTL"^"C-DMB")))) +
+    scale_x_continuous("Distance from eQTL to gene (kb)") +
+    scale_y_continuous("Count") +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+          axis.text.x=element_text(size=5),
+          axis.title.y=element_text(size=6),
+          axis.text.y=element_text(size=5),
+          legend.title=element_text(size=6),
+          legend.text=element_text(size=5),
+          legend.key=element_blank(),
+          legend.key.size=unit(0.5,"line"),
+          legend.position="top") +
+    guides(color=guide_legend(ncol=2))
+
+pdf(paste0(prefix.string,'tss_dist.pdf'),width=1.6,height=1.6)
+print(p4c)
+dev.off()
+@ 
+
+<<tss_grp1_bar>>=
+tss_dt3 = tss_dt[,dist_tss_grp1:=ifelse(is.na(dist_tss),rep('diff_chr',.N),
+                                 ifelse(abs(dist_tss)<10000,rep('prox',.N),rep('dist',.N)))]
+
+p5a = ggplot(data=tss_dt3,aes(x=allele,fill=dist_tss_grp1))
+p5b = p5a + geom_bar(position="dodge")
+p5c = p5b + scale_x_discrete("",breaks=c('eQTL','eQTL_mCG','eQTL_mCH','eQTL_mC'),
+                               labels=c("eQTL",expression(paste("eQTL"^"CG-DMB")),
+                                        expression(paste("eQTL"^"CH-DMB")),
+                                        expression(paste("eQTL"^"C-DMB")))) +
+    scale_fill_brewer("",palette="Set2",
+                             breaks=c('diff_chr','prox','dist'),
+                             labels=c("Different chromosome","Proximal","Distal")) +
+    scale_y_continuous("Number of associations") +
+    theme_bw() +
+    theme(axis.title.x=element_text(size=6),
+          axis.text.x=element_text(size=5),
+          axis.title.y=element_text(size=6),
+          axis.text.y=element_text(size=5),
+          legend.title=element_text(size=6),
+          legend.text=element_text(size=5),
+          legend.key=element_blank(),
+          legend.key.size=unit(0.5,"line"),
+          legend.position=c(0.9,0.9))
+print(p5c)
+@ 
+
+<<qtl_venn1,fig.width=3.2,fig.height=3.2>>=
+qtl_inter_table = fread(file.path(qtl_multiinter02_path,'qtl_intervals_table.txt'))
+qtl_inter_table[,id:=paste0(chrom,":",start,"-",end)]
+
+# no numbers
+# library(venneuler)
+#plot(venneuler(qtl_inter_table[,list(C_DMR,CG_DMR,RNA)])
+
+qtl_inter_list = list(RNA=qtl_inter_table[RNA==1,id],
+                      C_DMR=qtl_inter_table[C_DMR==1,id],
+                      CG_DMR=qtl_inter_table[CG_DMR==1,id])
+                      
+
+# could not get proportional scale
+#library(venneuler)
+#venn.plot = venn.diagram(qtl_inter_list,filename=NULL,euler.d=TRUE,scaled=TRUE)
+#grid.draw(venn.plot)
+
+venn = Venn(qtl_inter_list)
+
+#pdf(paste0(prefix.string,"qtl_venn1.pdf"),width=3.2,height=3.2)
+plot(venn)
+#dev.off()
+@ 
+
+
+<<sessionInfo>>=    
+sessionInfo()
+@
+
+
+\end{document}
