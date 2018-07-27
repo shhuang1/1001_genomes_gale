@@ -1,0 +1,9 @@
+/.snakemake
+.Rhistory
+.RData
+core.*
+Log.out
+out.log
+/test_v6/
+\#*\#
+*~
