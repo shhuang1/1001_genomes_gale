@@ -1,0 +1,14 @@
+{
+    "__default__" :
+    {
+        "account" : "ch153",
+        "time" : "02:00:00",
+        "nodes" : 1,
+        "mem" : "3200"
+    },
+    "pseudog_bowtie2_index":
+    {
+        "time" : "03:00:00",
+        "mem" : "20000"
+    }
+}
